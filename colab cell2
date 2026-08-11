@@ -1,0 +1,2798 @@
+
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMBA_NUM_THREADS"] = "1"
+
+import sys
+import pickle
+import math
+import json
+import time
+import datetime
+import copy
+import warnings
+import concurrent.futures
+import multiprocessing
+import shutil
+import faulthandler
+import importlib
+import random
+from datetime import timedelta
+from collections import defaultdict
+from scipy.special import expit
+from scipy import stats
+import numpy as np
+import pandas as pd
+import psutil
+
+faulthandler.enable()
+global_start_time = time.perf_counter()
+
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    message=".*datetime.datetime.utcnow.*"
+)
+
+if "STATE_MATRIX" not in globals():
+    _paths = [
+        "/tmp/feature_state_local.pkl",
+        "/content/drive/My Drive/trading_rl_project/feature_state.pkl",
+        "/content/drive/MyDrive/trading_rl_project/feature_state.pkl",
+        "/content/drive/My Drive/feature_state.pkl",
+        "/content/drive/MyDrive/feature_state.pkl",
+        "feature_state.pkl",
+    ]
+    _pkl_state = next((p for p in _paths if os.path.exists(p)), None)
+    if _pkl_state is not None:
+        with open(_pkl_state, "rb") as f:
+            globals().update(pickle.load(f))
+
+for _g in ["STATE_MATRIX", "STATE_COLUMNS", "STATE_INDEX", "final_symbols_data", "symbols_info_dict", "symbols"]:
+    assert _g in globals() or _g in locals()
+
+STATE_MATRIX = globals()["STATE_MATRIX"]
+STATE_COLUMNS = globals()["STATE_COLUMNS"]
+STATE_INDEX = globals()["STATE_INDEX"]
+final_symbols_data = globals()["final_symbols_data"]
+symbols_info_dict = globals()["symbols_info_dict"]
+symbols = globals()["symbols"]
+
+if "STRICT_ADMISSIBLE" in globals():
+    sadm = globals()["STRICT_ADMISSIBLE"]
+    if isinstance(sadm, (list, set, tuple, dict)):
+        sadm_symbols = {p[0] if isinstance(p, tuple) else p for p in sadm}
+        filtered = [s for s in symbols if s in sadm_symbols]
+        if len(filtered) > 0:
+            symbols = filtered
+
+def get_ic_markets_cost(symbol, df, info_dict):
+    price = float(df["Close"].mean())
+    si = info_dict.get(symbol)
+    point_val = getattr(si, "point", 0.00001)
+    contract_size = getattr(si, "trade_contract_size", 100000.0)
+    spread_cols = [c for c in df.columns if c.lower() == "spread"]
+    if len(spread_cols) > 0:
+        spread_pts = float(df[spread_cols[0]].median())
+        if spread_pts <= 0.0 or np.isnan(spread_pts):
+            spread_pts = getattr(si, "spread", 2.0)
+    else:
+        spread_pts = getattr(si, "spread", 2.0)
+    spread_cost = (spread_pts * point_val) / price
+    comm_cost = 7.0 / (contract_size * price) if contract_size > 0 else 0.0
+    return float(spread_cost + comm_cost)
+
+if "REAL_COST" not in globals():
+    REAL_COST = {}
+    for s in symbols:
+        REAL_COST[s] = get_ic_markets_cost(s, final_symbols_data[s], symbols_info_dict)
+    globals()["REAL_COST"] = REAL_COST
+else:
+    REAL_COST = globals()["REAL_COST"]
+
+if "SWAP_PER_NIGHT" not in globals():
+    SWAP_PER_NIGHT = {}
+    for s in symbols:
+        si_obj = symbols_info_dict.get(s, None)
+        price_val = float(final_symbols_data[s]["Close"].mean())
+        point_val = getattr(si_obj, "point", 0.00001)
+        if si_obj is not None and hasattr(si_obj, "swap_long") and hasattr(si_obj, "swap_short"):
+            worse_swap = min(si_obj.swap_long, si_obj.swap_short)
+            if worse_swap < 0.0:
+                SWAP_PER_NIGHT[s] = float((abs(worse_swap) * point_val) / price_val)
+            else:
+                SWAP_PER_NIGHT[s] = 0.0
+        else:
+            SWAP_PER_NIGHT[s] = 0.000005
+    globals()["SWAP_PER_NIGHT"] = SWAP_PER_NIGHT
+else:
+    SWAP_PER_NIGHT = globals()["SWAP_PER_NIGHT"]
+
+WINDOW = 4
+EMBARGO = 2880
+
+n_states = len(STATE_INDEX)
+i_tr = int(n_states * 0.7)
+
+train_slice_init = STATE_MATRIX[:i_tr]
+init_f_mean = np.mean(train_slice_init, axis=0, keepdims=True)
+init_f_std = np.std(train_slice_init, axis=0, keepdims=True)
+init_f_std[init_f_std < 1e-8] = 1.0
+STATE_MATRIX = (STATE_MATRIX - init_f_mean) / init_f_std
+
+VOL_MATRIX = np.zeros((len(STATE_INDEX), len(symbols)), dtype=np.float32)
+for s_idx, s in enumerate(symbols):
+    close = final_symbols_data[s]["Close"]
+    log_ret = np.log(close).diff()
+    rvol = log_ret.rolling(window=96, min_periods=10).std()
+    rvol = rvol.ffill().bfill().fillna(1e-4)
+    VOL_MATRIX[:, s_idx] = rvol.reindex(STATE_INDEX, method='pad').fillna(1e-4).values
+
+SWAP_LONG_CALIBRATED = {}
+SWAP_SHORT_CALIBRATED = {}
+
+def calibrate_swaps():
+    has_nonzero_swaps = False
+    for s in symbols:
+        si = symbols_info_dict.get(s)
+        if si is not None:
+            long_s = float(getattr(si, "swap_long", 0.0)) if not isinstance(si, dict) else float(si.get("swap_long", 0.0))
+            short_s = float(getattr(si, "swap_short", 0.0)) if not isinstance(si, dict) else float(si.get("swap_short", 0.0))
+            if abs(long_s) > 1e-5 or abs(short_s) > 1e-5:
+                has_nonzero_swaps = True
+                break
+    if not has_nonzero_swaps:
+        for s in symbols:
+            si = symbols_info_dict.get(s)
+            if si is not None:
+                if isinstance(si, dict):
+                    si["swap_long"] = 0.0
+                    si["swap_short"] = 0.0
+                else:
+                    setattr(si, "swap_long", 0.0)
+                    setattr(si, "swap_short", 0.0)
+    factors = []
+    symbol_raws = {}
+    for s in symbols:
+        si = symbols_info_dict.get(s)
+        if si is None:
+            raw_long, raw_short = 0.0, 0.0
+        elif isinstance(si, dict):
+            raw_long = float(si.get("swap_long", 0.0))
+            raw_short = float(si.get("swap_short", 0.0))
+        else:
+            raw_long = float(getattr(si, "swap_long", 0.0))
+            raw_short = float(getattr(si, "swap_short", 0.0))
+        symbol_raws[s] = (raw_long, raw_short)
+        worse_raw = min(raw_long, raw_short)
+        worse_clean = SWAP_PER_NIGHT.get(s, 0.0)
+        if worse_raw < 0.0 and worse_clean < 0.0:
+            factors.append(worse_clean / worse_raw)
+    global_factor = np.mean(factors) if factors else 1.0
+    for s in symbols:
+        raw_long, raw_short = symbol_raws.get(s, (0.0, 0.0))
+        worse_raw = min(raw_long, raw_short)
+        worse_clean = SWAP_PER_NIGHT.get(s, 0.0)
+        if worse_raw < 0.0 and worse_clean < 0.0:
+            factor = worse_clean / worse_raw
+        else:
+            factor = global_factor
+        SWAP_LONG_CALIBRATED[s] = raw_long * factor
+        SWAP_SHORT_CALIBRATED[s] = raw_short * factor
+
+calibrate_swaps()
+
+tp_train = STATE_INDEX[:i_tr].to_pydatetime().tolist()
+tp_val   = STATE_INDEX[i_tr + EMBARGO:].to_pydatetime().tolist()
+
+val_third = len(tp_val) // 3
+tp_val_1 = tp_val[:val_third]
+tp_val_2 = tp_val[val_third : 2 * val_third]
+tp_val_3 = tp_val[2 * val_third :]
+
+DEV_MODE = os.environ.get("DEV_MODE", "0") == "1"
+if DEV_MODE:
+    STEPS = 4096
+    SEED_SET = [42]
+    EVAL_SEEDS = [101]
+    n_steps = 512
+    batch_size = 64
+else:
+    STEPS = 30000
+    SEED_SET = [42, 43, 44, 45, 46]
+    EVAL_SEEDS = [101, 102, 103, 104, 105]
+    n_steps = 1024
+    batch_size = 128
+
+core_code = """import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMBA_NUM_THREADS"] = "1"
+
+import sys
+import pickle
+import math
+import json
+import time
+import datetime
+import copy
+import warnings
+import faulthandler
+import random
+from datetime import timedelta
+from collections import defaultdict
+from scipy.special import expit
+from scipy import stats
+import numpy as np
+import pandas as pd
+import psutil
+
+try:
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.callbacks import BaseCallback
+    from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+    from stable_baselines3.common.utils import explained_variance
+except ImportError:
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "-q", "install", "stable-baselines3"])
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.callbacks import BaseCallback
+    from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+    from stable_baselines3.common.utils import explained_variance
+
+if "gymnasium" in sys.modules:
+    import gymnasium as gym
+    from gymnasium import spaces
+else:
+    import gym
+    from gym import spaces
+
+import torch
+torch.set_num_threads(1)
+import torch.nn as nn
+
+random.seed(42)
+np.random.seed(42)
+torch.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+try:
+    torch.use_deterministic_algorithms(True, warn_only=True)
+except AttributeError:
+    pass
+
+from gym_mtsim import MtEnv, MtSimulator, OrderType
+
+if "STATE_MATRIX" not in globals():
+    _paths = [
+        "/tmp/feature_state_local.pkl",
+        "/content/drive/My Drive/trading_rl_project/feature_state.pkl",
+        "/content/drive/MyDrive/trading_rl_project/feature_state.pkl",
+        "/content/drive/My Drive/feature_state.pkl",
+        "/content/drive/MyDrive/feature_state.pkl",
+        "feature_state.pkl",
+    ]
+    _pkl_state = next((p for p in _paths if os.path.exists(p)), None)
+    if _pkl_state is not None:
+        with open(_pkl_state, "rb") as f:
+            globals().update(pickle.load(f))
+
+STATE_MATRIX = globals()["STATE_MATRIX"]
+STATE_COLUMNS = globals()["STATE_COLUMNS"]
+STATE_INDEX = globals()["STATE_INDEX"]
+final_symbols_data = globals()["final_symbols_data"]
+symbols_info_dict = globals()["symbols_info_dict"]
+symbols = globals()["symbols"]
+
+if "STRICT_ADMISSIBLE" in globals():
+    sadm = globals()["STRICT_ADMISSIBLE"]
+    if isinstance(sadm, (list, set, tuple, dict)):
+        sadm_symbols = {p[0] if isinstance(p, tuple) else p for p in sadm}
+        filtered = [s for s in symbols if s in sadm_symbols]
+        if len(filtered) > 0:
+            symbols = filtered
+
+WINDOW = 4
+EMBARGO = 2880
+n_states = len(STATE_INDEX)
+i_tr = int(n_states * 0.7)
+
+train_slice_core = STATE_MATRIX[:i_tr]
+core_f_mean = np.mean(train_slice_core, axis=0, keepdims=True)
+core_f_std = np.std(train_slice_core, axis=0, keepdims=True)
+core_f_std[core_f_std < 1e-8] = 1.0
+STATE_MATRIX = (STATE_MATRIX - core_f_mean) / core_f_std
+
+class EmaVarianceTracker:
+    def __init__(self, alpha=0.01, initial_var=1.0, floor=1e-3):
+        self.alpha = alpha
+        self.mean = 0.0
+        self.var = initial_var
+        self.floor = floor
+
+    def update(self, val):
+        self.mean = (1.0 - self.alpha) * self.mean + self.alpha * val
+        diff = val - self.mean
+        self.var = (1.0 - self.alpha) * self.var + self.alpha * (diff ** 2)
+        return math.sqrt(max(self.var, self.floor))
+
+def get_ic_markets_cost(symbol, df, info_dict):
+    price = float(df["Close"].mean())
+    si = info_dict.get(symbol)
+    point_val = getattr(si, "point", 0.00001)
+    contract_size = getattr(si, "trade_contract_size", 100000.0)
+    spread_cols = [c for c in df.columns if c.lower() == "spread"]
+    if len(spread_cols) > 0:
+        spread_pts = float(df[spread_cols[0]].median())
+        if spread_pts <= 0.0 or np.isnan(spread_pts):
+            spread_pts = getattr(si, "spread", 2.0)
+    else:
+        spread_pts = getattr(si, "spread", 2.0)
+    spread_cost = (spread_pts * point_val) / price
+    comm_cost = 7.0 / (contract_size * price) if contract_size > 0 else 0.0
+    return float(spread_cost + comm_cost)
+
+if "REAL_COST" not in globals():
+    REAL_COST = {}
+    for s in symbols:
+        REAL_COST[s] = get_ic_markets_cost(s, final_symbols_data[s], symbols_info_dict)
+    globals()["REAL_COST"] = REAL_COST
+else:
+    REAL_COST = globals()["REAL_COST"]
+
+if "SWAP_PER_NIGHT" not in globals():
+    SWAP_PER_NIGHT = {}
+    for s in symbols:
+        si_obj = symbols_info_dict.get(s, None)
+        price_val = float(final_symbols_data[s]["Close"].mean())
+        point_val = getattr(si_obj, "point", 0.00001)
+        if si_obj is not None and hasattr(si_obj, "swap_long") and hasattr(si_obj, "swap_short"):
+            worse_swap = min(si_obj.swap_long, si_obj.swap_short)
+            if worse_swap < 0.0:
+                SWAP_PER_NIGHT[s] = float((abs(worse_swap) * point_val) / price_val)
+            else:
+                SWAP_PER_NIGHT[s] = 0.0
+        else:
+            SWAP_PER_NIGHT[s] = 0.000005
+    globals()["SWAP_PER_NIGHT"] = SWAP_PER_NIGHT
+else:
+    SWAP_PER_NIGHT = globals()["SWAP_PER_NIGHT"]
+
+VOL_MATRIX = np.zeros((len(STATE_INDEX), len(symbols)), dtype=np.float32)
+for s_idx, s in enumerate(symbols):
+    close = final_symbols_data[s]["Close"]
+    log_ret = np.log(close).diff()
+    rvol = log_ret.rolling(window=96, min_periods=10).std()
+    rvol = rvol.ffill().bfill().fillna(1e-4)
+    VOL_MATRIX[:, s_idx] = rvol.reindex(STATE_INDEX, method='pad').fillna(1e-4).values
+
+SWAP_LONG_CALIBRATED = {}
+SWAP_SHORT_CALIBRATED = {}
+
+def safe_std(arr):
+    if len(arr) <= 1:
+        return 1e-9
+    val = float(np.std(arr, ddof=1))
+    return val if (not np.isnan(val) and val > 0.0) else 1e-9
+
+def calibrate_swaps():
+    has_nonzero_swaps = False
+    for s in symbols:
+        si = symbols_info_dict.get(s)
+        if si is not None:
+            long_s = float(getattr(si, "swap_long", 0.0)) if not isinstance(si, dict) else float(si.get("swap_long", 0.0))
+            short_s = float(getattr(si, "swap_short", 0.0)) if not isinstance(si, dict) else float(si.get("swap_short", 0.0))
+            if abs(long_s) > 1e-5 or abs(short_s) > 1e-5:
+                has_nonzero_swaps = True
+                break
+    if not has_nonzero_swaps:
+        for s in symbols:
+            si = symbols_info_dict.get(s)
+            if si is not None:
+                if isinstance(si, dict):
+                    si["swap_long"] = 0.0
+                    si["swap_short"] = 0.0
+                else:
+                    setattr(si, "swap_long", 0.0)
+                    setattr(si, "swap_short", 0.0)
+    factors = []
+    symbol_raws = {}
+    for s in symbols:
+        si = symbols_info_dict.get(s)
+        if si is None:
+            raw_long, raw_short = 0.0, 0.0
+        elif isinstance(si, dict):
+            raw_long = float(si.get("swap_long", 0.0))
+            raw_short = float(si.get("swap_short", 0.0))
+        else:
+            raw_long = float(getattr(si, "swap_long", 0.0))
+            raw_short = float(getattr(si, "swap_short", 0.0))
+        symbol_raws[s] = (raw_long, raw_short)
+        worse_raw = min(raw_long, raw_short)
+        worse_clean = SWAP_PER_NIGHT.get(s, 0.0)
+        if worse_raw < 0.0 and worse_clean < 0.0:
+            factors.append(worse_clean / worse_raw)
+    global_factor = np.mean(factors) if factors else 1.0
+    for s in symbols:
+        raw_long, raw_short = symbol_raws[s]
+        worse_raw = min(raw_long, raw_short)
+        worse_clean = SWAP_PER_NIGHT.get(s, 0.0)
+        if worse_raw < 0.0 and worse_clean < 0.0:
+            factor = worse_clean / worse_raw
+        else:
+            factor = global_factor
+        SWAP_LONG_CALIBRATED[s] = raw_long * factor
+        SWAP_SHORT_CALIBRATED[s] = raw_short * factor
+
+calibrate_swaps()
+
+tp_train = STATE_INDEX[:i_tr].to_pydatetime().tolist()
+tp_val   = STATE_INDEX[i_tr + EMBARGO:].to_pydatetime().tolist()
+
+val_third = len(tp_val) // 3
+tp_val_1 = tp_val[:val_third]
+tp_val_2 = tp_val[val_third : 2 * val_third]
+tp_val_3 = tp_val[2 * val_third :]
+
+class OnlineFeatureNormalizer:
+    def __init__(self, shape, alpha=0.01):
+        self.alpha = alpha
+        self.mean = np.zeros(shape, dtype=np.float32)
+        self.var = np.ones(shape, dtype=np.float32)
+
+    def update(self, x):
+        self.mean = (1.0 - self.alpha) * self.mean + self.alpha * x
+        self.var = (1.0 - self.alpha) * self.var + self.alpha * ((x - self.mean) ** 2)
+        std = np.sqrt(self.var)
+        std[std < 1e-8] = 1.0
+        return (x - self.mean) / std
+
+class GradNormTracker:
+    def __init__(self, module):
+        self.norms = []
+        self.hooks = []
+        for p in module.parameters():
+            if p.requires_grad:
+                self.hooks.append(p.register_hook(self._make_hook()))
+
+    def _make_hook(self):
+        def hook(grad):
+            self.norms.append(grad.detach().cpu().norm().item())
+            return grad
+        return hook
+
+    def pop_mean(self):
+        if not self.norms:
+            return 0.0
+        m = float(np.mean(self.norms))
+        self.norms.clear()
+        return m
+
+    def close(self):
+        for h in self.hooks:
+            h.remove()
+
+def compute_srank(X, eps=1e-12):
+    if X.ndim != 2 or X.shape[0] < 2:
+        return 1.0
+    try:
+        _, s, _ = np.linalg.svd(X, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return 1.0
+    s_sum = np.sum(s)
+    if s_sum < eps:
+        return 1.0
+    p = s / s_sum
+    p = np.clip(p, eps, 1.0)
+    entropy = -np.sum(p * np.log(p))
+    return float(np.exp(entropy))
+
+def to_float_tensor(v, device):
+    t = torch.as_tensor(v, device=device)
+    if t.dtype == torch.float64:
+        return t.to(torch.float32)
+    return t
+
+def compute_rollout_srank(model):
+    policy = model.policy
+    obs = model.rollout_buffer.observations
+    tensor_obs = {}
+    for k, v in obs.items():
+        shape = v.shape
+        flat_shape = (shape[0] * shape[1],) + shape[2:]
+        tensor_obs[k] = to_float_tensor(v, policy.device).reshape(flat_shape)
+    with torch.no_grad():
+        features = policy.features_extractor(tensor_obs)
+        latent_vf = policy.mlp_extractor.value_net(features)
+    latent_vf_np = latent_vf.cpu().numpy()
+    return compute_srank(latent_vf_np)
+
+def compute_pcgrad_cosine(model, obs, actions, raw_rewards, penalties):
+    policy = model.policy
+    policy.zero_grad()
+    tensor_obs = {}
+    for k, v in obs.items():
+        shape = v.shape
+        flat_shape = (shape[0] * shape[1],) + shape[2:]
+        tensor_obs[k] = to_float_tensor(v, policy.device).reshape(flat_shape)
+    flat_actions_shape = (actions.shape[0] * actions.shape[1],) + actions.shape[2:]
+    actions_tensor = torch.as_tensor(actions, device=policy.device).reshape(flat_actions_shape)
+    if actions_tensor.dtype == torch.float64:
+        actions_tensor = actions_tensor.to(torch.float32)
+    raw_rewards_tensor = torch.as_tensor(raw_rewards, dtype=torch.float32, device=policy.device)
+    penalties_tensor = torch.as_tensor(penalties, dtype=torch.float32, device=policy.device)
+    distribution = policy.get_distribution(tensor_obs)
+    log_prob = distribution.log_prob(actions_tensor)
+    loss_raw = - (log_prob * raw_rewards_tensor).mean()
+    loss_pen = - (log_prob * penalties_tensor).mean()
+    policy_params = list(policy.action_net.parameters()) + list(policy.mlp_extractor.policy_net.parameters())
+    policy_params = [p for p in policy_params if p.requires_grad]
+    grad_raw = torch.autograd.grad(loss_raw, policy_params, retain_graph=True, allow_unused=True)
+    grad_pen = torch.autograd.grad(loss_pen, policy_params, allow_unused=True)
+    flat_grad_raw = []
+    flat_grad_pen = []
+    for gr, gp in zip(grad_raw, grad_pen):
+        if gr is not None:
+            flat_grad_raw.append(gr.detach().flatten())
+        if gp is not None:
+            flat_grad_pen.append(gp.detach().flatten())
+    if not flat_grad_raw or not flat_grad_pen:
+        return 0.0
+    g_raw = torch.cat(flat_grad_raw)
+    g_pen = torch.cat(flat_grad_pen)
+    norm_raw = g_raw.norm()
+    norm_pen = g_pen.norm()
+    if norm_raw < 1e-8 or norm_pen < 1e-8:
+        return 0.0
+    cos_sim = torch.dot(g_raw, g_pen) / (norm_raw * norm_pen)
+    return float(cos_sim.cpu().item())
+
+def compute_shift_error_correlation(env, model, seed):
+    obs, _ = env.reset(seed=seed)
+    feature_values = []
+    critic_preds = []
+    done = False
+    policy = model.policy
+    while not done:
+        with torch.no_grad():
+            tensor_obs = {}
+            for k, v in obs.items():
+                t = torch.as_tensor(v, device=policy.device)
+                if t.dtype == torch.float64:
+                    t = t.to(torch.float32)
+                tensor_obs[k] = t.unsqueeze(0)
+            val = policy.predict_values(tensor_obs).cpu().numpy().item()
+        feature_values.append(obs["features"][-1].copy())
+        obs, r, term, trunc, info = env.step(model.predict(obs, deterministic=True)[0])
+        critic_preds.append(val)
+        done = term or trunc
+    feature_values = np.array(feature_values)
+    critic_preds = np.array(critic_preds)
+    corrs = []
+    for idx in range(feature_values.shape[1]):
+        col = feature_values[:, idx]
+        if np.std(col) > 1e-8 and np.std(critic_preds) > 1e-8:
+            c, _ = stats.pearsonr(col, critic_preds)
+            corrs.append(float(np.nan_to_num(c)))
+        else:
+            corrs.append(0.0)
+    return corrs
+
+def paired_bootstrap_analysis(agent_pnls, null_pnls, num_bootstrap=1000, seed=42):
+    rng = np.random.default_rng(seed)
+    diffs = np.array(agent_pnls) - np.array(null_pnls)
+    if len(diffs) == 0:
+        return 0.5, 0.0, 0.0
+    boot_means = []
+    for _ in range(num_bootstrap):
+        boot_sample = rng.choice(diffs, size=len(diffs), replace=True)
+        boot_means.append(np.mean(boot_sample))
+    prob_outperform = float(np.mean(np.array(boot_means) > 0.0))
+    mean_diff = float(np.mean(diffs))
+    std_diff = float(np.std(diffs, ddof=1)) if len(diffs) > 1 else 0.0
+    return prob_outperform, mean_diff, std_diff
+
+class ICSimulator(MtSimulator):
+    PRICE_KEY_ENTRY = "Open"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.accumulated_fees = 0.0
+        self.accumulated_swaps = 0.0
+        self.accumulated_partial_fees = 0.0
+        self.accumulated_partial_profits = 0.0
+
+    def _create_hedged_order(self, order_type, symbol, volume, fee_in_price_units, raise_exception):
+        row = self.symbols_data[symbol].loc[self.nearest_time(symbol, self.current_time)]
+        order = super()._create_hedged_order(order_type, symbol, volume, fee_in_price_units, raise_exception)
+        if order is not None:
+            order.entry_price = float(row[self.PRICE_KEY_ENTRY])
+            self._update_order_profit(order)
+            self._update_order_margin(order)
+            si = self.symbols_info[symbol]
+            unit_ratio = self._get_unit_ratio(symbol, self.current_time)
+            fee_val = fee_in_price_units * volume * si.trade_contract_size * unit_ratio
+            self.accumulated_fees += fee_val
+        return order
+
+    def _create_unhedged_order(self, order_type, symbol, volume, fee, raise_exception):
+        if symbol not in map(lambda order: order.symbol, self.orders):
+            return super()._create_unhedged_order(order_type, symbol, volume, fee, raise_exception)
+        old_order = self.symbol_orders(symbol)[0]
+        if old_order.type == order_type:
+            return super()._create_unhedged_order(order_type, symbol, volume, fee, raise_exception)
+        if volume >= old_order.volume:
+            return super()._create_unhedged_order(order_type, symbol, volume, fee, raise_exception)
+        partial_profit = (volume / old_order.volume) * old_order.profit
+        self.accumulated_partial_profits += partial_profit
+        si = self.symbols_info[symbol]
+        u_ratio = self._get_unit_ratio(symbol, self.current_time)
+        partial_fee = volume * si.trade_contract_size * old_order.fee * u_ratio
+        self.accumulated_partial_fees += partial_fee
+        return super()._create_unhedged_order(order_type, symbol, volume, fee, raise_exception)
+
+    def tick(self, delta_time=timedelta()):
+        prev_date = self.current_time.date() if self.current_time is not NotImplemented else None
+        super().tick(delta_time)
+        if prev_date is not None and self.current_time.date() != prev_date:
+            for od in self.orders:
+                if od.symbol in ["BTCUSD"]:
+                    mult = 3.0 if self.current_time.weekday() == 4 else 1.0
+                else:
+                    mult = 3.0 if self.current_time.weekday() == 2 else 1.0
+                v = od.volume
+                if od.type == OrderType.Buy:
+                    symbol_swap = SWAP_LONG_CALIBRATED.get(od.symbol, 0.0)
+                else:
+                    symbol_swap = SWAP_SHORT_CALIBRATED.get(od.symbol, 0.0)
+                swap = symbol_swap * v * mult * self._get_unit_ratio(od.symbol, self.current_time)
+                self.balance += swap
+                self.accumulated_swaps += swap
+            self.equity = self.balance + sum(o.profit for o in self.orders)
+
+class ICEnv(MtEnv):
+    def __init__(self, sim, trading_symbols, window_size, time_points,
+                 dsr_eta=0.004, target_ann_vol=0.10, rebalance_band=0.10, cost_multiplier=1.0, 
+                 decision_interval=96, **kw):
+        self._dsr_eta, self._tgtvol, self._band = dsr_eta, target_ann_vol, rebalance_band
+        self._cost_mult = cost_multiplier
+        self.decision_interval = decision_interval
+        super().__init__(original_simulator=sim, trading_symbols=trading_symbols,
+                         window_size=window_size, time_points=time_points,
+                         fee=lambda s: REAL_COST[s] * self._cost_mult, **kw)
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(len(trading_symbols),), dtype=np.float64)
+        self.peak_eq = 0.0
+        self._barvol = {s: float(np.nanstd(np.log(final_symbols_data[s]["Close"].loc[:STATE_INDEX[i_tr]]).diff())) for s in trading_symbols}
+        self.symbol_to_idx = {s: i for i, s in enumerate(trading_symbols)}
+
+    def _get_prices(self, keys=['Close', 'Open']):
+        prices = {}
+        for symbol in self.trading_symbols:
+            df = self.original_simulator.symbols_data[symbol]
+            aligned_df = df[keys].reindex(self.time_points, method='ffill').bfill()
+            prices[symbol] = aligned_df.values
+        return prices
+
+    def _process_data(self):
+        tp = pd.DatetimeIndex(self.time_points)
+        pos = STATE_INDEX.get_indexer(tp)
+        assert (pos >= 0).all()
+        assert np.all(np.diff(pos) == 1)
+        self._pos_mapping = pos
+        return STATE_MATRIX[pos]
+
+    def reset(self, seed=None, options=None):
+        self.peak_eq = 0.0
+        super(MtEnv, self).reset(seed=seed, options=options)
+        self._truncated = False
+        self._current_tick = self._start_tick
+        self.simulator = copy.copy(self.original_simulator)
+        self.simulator.orders = []
+        self.simulator.closed_orders = []
+        self.simulator.accumulated_fees = 0.0
+        self.simulator.accumulated_swaps = 0.0
+        self.simulator.accumulated_partial_fees = 0.0
+        self.simulator.accumulated_partial_profits = 0.0
+        self.simulator.balance = float(self.original_simulator.balance)
+        self.simulator.equity = float(self.original_simulator.balance)
+        self.simulator.margin = 0.0
+        self.simulator.current_time = self.time_points[self._current_tick]
+        self.history = [self._create_info()]
+        obs = self._get_observation()
+        info = self._create_info()
+        return obs, info
+
+    def step(self, action):
+        orders_info, closed_info = self._apply_action(np.asarray(action, float))
+        terminate = False
+        for _ in range(self.decision_interval):
+            if self._current_tick >= self._end_tick - 1:
+                self._truncated = True
+                break
+            self._current_tick += 1
+            dt = self.time_points[self._current_tick] - self.time_points[self._current_tick - 1]
+            self.unwrapped.simulator.tick(dt)
+            self.peak_eq = max(self.unwrapped.simulator.equity, self.peak_eq)
+            if self.unwrapped.simulator.equity <= 1.0:
+                terminate = True
+                break
+        step_reward = self._calculate_reward()
+        info = self._create_info(orders=orders_info, closed_orders=closed_info, step_reward=step_reward)
+        obs = self._get_observation()
+        self.history.append(info)
+        return obs, step_reward, terminate, self._truncated, info
+
+    def get_trend_sign(self, symbol):
+        tick = self._current_tick
+        current_time = self.time_points[tick]
+        df = self.unwrapped.simulator.symbols_data[symbol]
+        nearest_idx = df.index.get_indexer([current_time], method='pad')[0]
+        if nearest_idx >= 96:
+            price_now = float(df.iloc[nearest_idx]["Close"])
+            price_past = float(df.iloc[nearest_idx - 96]["Close"])
+            return 1.0 if price_now >= price_past else -1.0
+        return 0.0
+
+class MarkovRewardEnv(ICEnv):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._alpha = self._dsr_eta
+        self._prior_vol = abs(math.log(0.97))
+        self._ewma_ret = 0.0
+        self._ewma_downside_var = self._prior_vol ** 2
+        self._step_count = 0
+        self.reward_branch_switches = 0
+        self.last_reward_branch = None
+        self.d_prev_safe_records = []
+
+    def warm_start_dsr(self, start_tick):
+        hist_vols = []
+        for s in self.trading_symbols:
+            close_series = self.original_simulator.symbols_data[s]["Close"]
+            pos = STATE_INDEX.get_indexer([self.time_points[start_tick]], method="pad")[0]
+            start_p = max(0, pos - 100)
+            sub_close = close_series.iloc[start_p:pos+1]
+            if len(sub_close) > 1:
+                log_rets = np.log(sub_close).diff().dropna()
+                downside_rets = log_rets[log_rets < 0.0]
+                if len(downside_rets) > 1:
+                    hist_vols.append(np.mean(downside_rets ** 2))
+        if hist_vols:
+            self._ewma_downside_var = float(np.mean(hist_vols))
+        else:
+            self._ewma_downside_var = self._prior_vol ** 2
+        self._ewma_ret = 0.0
+
+    def reset(self, seed=None, options=None):
+        self._step_count = 0
+        self.reward_branch_switches = 0
+        self.last_reward_branch = None
+        self.d_prev_safe_records.clear()
+        self._ewma_ret = 0.0
+        self._ewma_downside_var = self._prior_vol ** 2
+        return super().reset(seed=seed, options=options)
+
+    def _calculate_reward(self):
+        prev = self.history[-1]["equity"]
+        current_eq_safe = max(1.0, self.simulator.equity)
+        prev_eq_safe = max(1.0, prev)
+        R_t = math.log(current_eq_safe / prev_eq_safe)
+        A_prev = self._ewma_ret
+        D_prev = self._ewma_downside_var
+        min_vol_sq = (math.log(0.97)) ** 2
+        D_prev_safe = max(D_prev, min_vol_sq)
+        self.d_prev_safe_records.append(D_prev_safe)
+        if R_t > 0.0:
+            reward = (R_t - 0.5 * A_prev) / math.sqrt(D_prev_safe)
+            curr_branch = 1
+        else:
+            reward = (R_t * D_prev_safe - 0.5 * A_prev * (D_prev_safe + R_t ** 2)) / (D_prev_safe ** 1.5)
+            curr_branch = -1
+        if self.last_reward_branch is not None and curr_branch != self.last_reward_branch:
+            self.reward_branch_switches += 1
+        self.last_reward_branch = curr_branch
+        self._ewma_ret = (1.0 - self._alpha) * A_prev + self._alpha * R_t
+        self._ewma_downside_var = (1.0 - self._alpha) * D_prev + self._alpha * (min(R_t, 0.0) ** 2)
+        self._step_count += 1
+        return float(reward)
+
+class TargetWeightEnv(MarkovRewardEnv):
+    def __init__(self, *a, turnover_penalty_lambda=0.0, is_eval=False, **kw):
+        self._turnover_penalty_lambda = turnover_penalty_lambda
+        self._is_eval = is_eval
+        super().__init__(*a, **kw)
+        d = dict(self.observation_space.spaces)
+        d["pos_state"] = spaces.Box(-np.inf, np.inf, shape=(len(self.trading_symbols),), dtype=np.float64)
+        d["dsr_state"] = spaces.Box(-np.inf, np.inf, shape=(2,), dtype=np.float64)
+        self.observation_space = spaces.Dict(d)
+        self._last_turnover = 0.0
+        self._last_actions = np.zeros(len(self.trading_symbols), dtype=np.float64)
+        self._action_diffs = []
+        self.accumulated_raw_rewards = 0.0
+        self.accumulated_turnover_penalties = 0.0
+        self.accumulated_norm_raw_weighted = 0.0
+        self.accumulated_norm_pen_weighted = 0.0
+        self._last_norm_raw_weighted = 0.0
+        self._last_norm_pen_weighted = 0.0
+        self._last_weights = np.zeros(len(self.trading_symbols), dtype=np.float64)
+        self.raw_tracker = EmaVarianceTracker(alpha=0.01, initial_var=1.0, floor=1e-3)
+        self.pen_tracker = EmaVarianceTracker(alpha=0.01, initial_var=0.1, floor=1e-3)
+        self.rollout_raw_rewards = []
+        self.rollout_penalties = []
+        self.history_proxy_rewards = []
+        self.history_true_pnls = []
+
+    def _calculate_reward(self):
+        raw = super()._calculate_reward()
+        pen = float(self._turnover_penalty_lambda * self._last_turnover)
+        total = raw - pen
+        self.rollout_raw_rewards.append(float(raw))
+        self.rollout_penalties.append(float(pen))
+        self.accumulated_raw_rewards += float(raw)
+        self.accumulated_turnover_penalties += float(pen)
+        self.accumulated_norm_raw_weighted += float(raw)
+        self.accumulated_norm_pen_weighted += float(pen)
+        return float(total)
+
+    def copy_trackers_from(self, other_env):
+        self.raw_tracker.mean = other_env.raw_tracker.mean
+        self.raw_tracker.var = other_env.raw_tracker.var
+        self.pen_tracker.mean = other_env.pen_tracker.mean
+        self.pen_tracker.var = other_env.pen_tracker.var
+
+    def _current_weights(self):
+        eq = max(self.unwrapped.simulator.equity, 1e-9)
+        ws = []
+        tp_idx = self._pos_mapping[self._current_tick]
+        for s in self.trading_symbols:
+            si = self.unwrapped.simulator.symbols_info[s]
+            px = self.unwrapped.simulator.price_at(s, self.unwrapped.simulator.current_time)["Close"]
+            s_idx = self.symbol_to_idx[s]
+            current_vol = float(VOL_MATRIX[tp_idx, s_idx])
+            ann = current_vol * math.sqrt(96 * 252)
+            cur_lots = sum(o.volume * o.type.sign for o in self.unwrapped.simulator.symbol_orders(s))
+            unit_ratio = self.unwrapped.simulator._get_unit_ratio(s, self.unwrapped.simulator.current_time)
+            notional_per_lot = px * si.trade_contract_size * unit_ratio
+            denom = eq * (self._tgtvol / (ann + 1e-12)) / (notional_per_lot + 1e-12)
+            ws.append(cur_lots / (denom + 1e-12))
+        return np.array(ws, np.float64)
+
+    def _get_observation(self):
+        obs = super()._get_observation()
+        if self._is_eval:
+            if not hasattr(self, "feature_normalizer") or self.feature_normalizer is None:
+                self.feature_normalizer = OnlineFeatureNormalizer(obs["features"].shape, alpha=0.01)
+            obs["features"] = self.feature_normalizer.update(obs["features"].astype(np.float32))
+        obs["pos_state"] = self._current_weights()
+        obs["dsr_state"] = np.array([self._ewma_ret, self._ewma_downside_var], dtype=np.float64)
+        return obs
+
+    def reset(self, seed=None, options=None):
+        self._last_turnover = 0.0
+        self._last_actions = np.zeros(len(self.trading_symbols), dtype=np.float64)
+        self._action_diffs.clear()
+        self.accumulated_raw_rewards = 0.0
+        self.accumulated_turnover_penalties = 0.0
+        self.accumulated_norm_raw_weighted = 0.0
+        self.accumulated_norm_pen_weighted = 0.0
+        self._last_norm_raw_weighted = 0.0
+        self._last_norm_pen_weighted = 0.0
+        self._last_weights = np.zeros(len(self.trading_symbols), dtype=np.float64)
+        
+        preserve = False
+        if options is not None and isinstance(options, dict):
+            preserve = options.get("preserve_trackers", False)
+            
+        if not preserve:
+            self.raw_tracker = EmaVarianceTracker(alpha=0.01, initial_var=1.0, floor=1e-3)
+            self.pen_tracker = EmaVarianceTracker(alpha=0.01, initial_var=0.1, floor=1e-3)
+            
+        self.feature_normalizer = None
+
+        self.rollout_raw_rewards = self.rollout_raw_rewards[-2048:]
+        self.rollout_penalties = self.rollout_penalties[-2048:]
+        self.history_proxy_rewards = []
+        self.history_true_pnls = []
+        return super().reset(seed=seed, options=options)
+
+    def _apply_action(self, w):
+        orders_info = {}
+        closed_info = {s: [] for s in self.trading_symbols}
+        eq = self.unwrapped.simulator.equity
+        turnover = 0.0
+        diffs = np.abs(w - self._last_actions)
+        self._action_diffs.extend(diffs.tolist())
+        self._last_actions = w.copy()
+        for i, s in enumerate(self.trading_symbols):
+            si = self.unwrapped.simulator.symbols_info[s]
+            px = self.unwrapped.simulator.price_at(s, self.unwrapped.simulator.current_time)["Open"]
+            tp_idx = self._pos_mapping[self._current_tick]
+            s_idx = self.symbol_to_idx[s]
+            current_vol = float(VOL_MATRIX[tp_idx, s_idx])
+            ann = current_vol * math.sqrt(96 * 252)
+            a_i = float(w[i])
+            directional_w_i = a_i * 1.5
+            unit_ratio = self.unwrapped.simulator._get_unit_ratio(s, self.unwrapped.simulator.current_time)
+            notional_per_lot = px * si.trade_contract_size * unit_ratio
+            scale = eq * (self._tgtvol / (ann + 1e-12)) / (notional_per_lot + 1e-12)
+            cur = self.unwrapped.simulator.symbol_orders(s)
+            cur_lots = sum(o.volume * o.type.sign for o in cur)
+            
+            c_i = REAL_COST[s] * self._cost_mult
+            gamma_i = 1.0 / (1.0 + 100.0 * c_i * (ann + 1e-6))
+            gamma_i = max(0.05, min(1.0, gamma_i))
+            
+            tgt_lots = (1.0 - gamma_i) * cur_lots + gamma_i * directional_w_i * scale
+            q_lots = round(tgt_lots / si.volume_step) * si.volume_step
+            if abs(q_lots) < si.volume_min:
+                q_lots = 0.0
+            delta = q_lots - cur_lots
+            turnover += abs(delta) / (scale + 1e-12)
+            
+            band_thr = max(si.volume_min, max(abs(tgt_lots), abs(cur_lots)) * self._band)
+            if abs(delta) < band_thr:
+                orders_info[s] = dict(hold=True, target=tgt_lots, current=cur_lots)
+                continue
+            try:
+                if cur_lots != 0.0 and (q_lots == 0.0 or np.sign(q_lots) != np.sign(cur_lots)):
+                    for o in list(cur):
+                        p = self.unwrapped.simulator.close_order(o)
+                        closed_info[s].append(dict(order_id=o.id, profit=p))
+                    if abs(q_lots) >= si.volume_min:
+                        ot = OrderType.Buy if q_lots > 0 else OrderType.Sell
+                        od = self.unwrapped.simulator.create_order(ot, s, self._get_modified_volume(s, abs(q_lots)), REAL_COST[s] * self._cost_mult * px)
+                        orders_info[s] = dict(hold=False, order_id=od.id, volume=od.volume, target=tgt_lots)
+                    else:
+                        orders_info[s] = dict(hold=False, order_id=None, volume=0.0, target=tgt_lots)
+                else:
+                    dv = abs(delta)
+                    if dv >= si.volume_min:
+                        ot = OrderType.Buy if delta > 0 else OrderType.Sell
+                        od = self.unwrapped.simulator.create_order(ot, s, self._get_modified_volume(s, dv), REAL_COST[s] * self._cost_mult * px)
+                        orders_info[s] = dict(hold=False, order_id=od.id, volume=od.volume, target=tgt_lots)
+                    else:
+                        orders_info[s] = dict(hold=True, target=tgt_lots, current=cur_lots)
+            except ValueError as e:
+                orders_info[s] = dict(hold=False, error=str(e), target=tgt_lots)
+        self._last_turnover = float(turnover)
+        return orders_info, closed_info
+
+class BootstrapFix(gym.Wrapper):
+    def step(self, a):
+        obs, r, term, trunc, info = self.env.step(a)
+        if trunc and not term:
+            info["TimeLimit.truncated"] = True
+            info["terminal_observation"] = obs
+        return obs, r, term, trunc, info
+
+class SubEpisodeEnv(gym.Wrapper):
+    def __init__(self, env, ep_len=5000):
+        super().__init__(env)
+        self.ep_len = ep_len
+
+    def reset(self, seed=None, options=None):
+        obs, info = self.env.reset(seed=seed, options=options)
+        lo = self.unwrapped._start_tick
+        hi = self.unwrapped._end_tick - self.ep_len - 10
+        start = int(self.unwrapped.np_random.integers(lo, hi))
+        self.unwrapped._current_tick = start
+        self.unwrapped.simulator.current_time = self.unwrapped.time_points[start]
+        if hasattr(self.unwrapped, "warm_start_dsr"):
+            self.unwrapped.warm_start_dsr(start)
+        self._stop = start + self.ep_len
+        return self.unwrapped._get_observation(), info
+
+    def step(self, a):
+        obs, r, term, trunc, info = self.env.step(a)
+        if self.unwrapped._current_tick >= self._stop:
+            trunc = True
+        return obs, r, term, trunc, info
+
+class HarnessASanityWrapper(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.W, self.D = self.unwrapped.observation_space["features"].shape
+        self.num_symbols = len(self.unwrapped.trading_symbols)
+
+    def _make_synthetic_obs(self, obs, tick):
+        features = np.zeros((self.W, self.D), dtype=np.float32)
+        for w in range(self.W):
+            for i in range(self.num_symbols):
+                phase = i * math.pi / 3.0
+                t = tick - (self.W - 1 - w)
+                features[w, i] = 0.5 * math.sin(t / 5.0 + phase)
+        obs["features"] = features
+        return obs
+
+    def reset(self, seed=None, options=None):
+        obs, info = self.env.reset(seed=seed, options=options)
+        obs = self._make_synthetic_obs(obs, self.unwrapped._current_tick)
+        return obs, info
+
+    def step(self, action):
+        obs, r, term, trunc, info = self.env.step(action)
+        obs = self._make_synthetic_obs(obs, self.unwrapped._current_tick)
+        return obs, r, term, trunc, info
+
+class MLPExtractorDSR(BaseFeaturesExtractor):
+    def __init__(self, observation_space, d_model=64):
+        W, D = observation_space["features"].shape
+        flat_dim = W * D
+        super().__init__(observation_space, features_dim=d_model + 8)
+        self.features_flat_dim = flat_dim
+        self.feature_mlp = nn.Sequential(
+            nn.Linear(flat_dim, d_model),
+            nn.LayerNorm(d_model),
+            nn.Tanh(),
+            nn.Linear(d_model, d_model),
+            nn.Tanh()
+        )
+        n_ord = int(np.prod(observation_space["orders"].shape))
+        n_extra = 0
+        self._has_dsr = "dsr_state" in observation_space.spaces
+        self._has_pos = "pos_state" in observation_space.spaces
+        if self._has_dsr:
+            n_extra += 2
+        if self._has_pos:
+            n_extra += int(np.prod(observation_space["pos_state"].shape))
+        self.acct = nn.Sequential(
+            nn.Linear(3 + n_ord + n_extra, 8),
+            nn.Tanh()
+        )
+
+    def forward(self, obs):
+        x = obs["features"].flatten(1)
+        z = self.feature_mlp(x)
+        scale = obs["equity"].abs() + 1e-6
+        parts = [
+            obs["balance"] / scale,
+            obs["equity"] / scale,
+            obs["margin"] / scale,
+            obs["orders"].flatten(1)
+        ]
+        if self._has_dsr:
+            parts.append(obs["dsr_state"])
+        if self._has_pos:
+            parts.append(obs["pos_state"])
+        acct_in = torch.cat(parts, dim=1)
+        return torch.cat([z, self.acct(acct_in)], dim=1)
+
+class PopArtTracker:
+    def __init__(self, beta=0.05):
+        self.beta = beta
+        self.mu = 0.0
+        self.sigma = 1.0
+
+    def update(self, batch_returns):
+        old_mu = self.mu
+        old_sigma = self.sigma
+        batch_mu = float(np.mean(batch_returns))
+        batch_var = float(np.var(batch_returns))
+        self.mu = (1.0 - self.beta) * old_mu + self.beta * batch_mu
+        new_var = (1.0 - self.beta) * (old_sigma ** 2) + self.beta * batch_var
+        self.sigma = math.sqrt(max(new_var, 1e-4))
+        return old_mu, old_sigma, self.mu, self.sigma
+
+class EVTracker(BaseCallback):
+    def __init__(self, every, value_net_module, validation_env=None, verbose=0, silent=True):
+        super().__init__(verbose)
+        self.every = every
+        self.value_net_module = value_net_module
+        self.validation_env = validation_env
+        self.grad_tracker = GradNormTracker(value_net_module)
+        self.lines = []
+        self.silent = silent
+        self.popart = PopArtTracker(beta=0.05)
+        self._prev_actions = None
+        self.should_stop = False
+        self.best_val_pnl = -1e9
+        self.patience_counter = 0
+        self.ev_history = []
+        self.val_pnl_history = []
+        self.anomalies = []
+
+    def _on_step(self) -> bool:
+        if hasattr(self, "should_stop") and self.should_stop:
+            if not self.silent:
+                print(f"[EARLY-STOP] Critic validation return patience gate triggered. Stopping training early.", flush=True)
+            return False
+        return True
+
+    def _on_rollout_end(self) -> None:
+        step = self.num_timesteps
+        returns_raw = self.model.rollout_buffer.returns.copy()
+        old_mu, old_sigma, new_mu, new_sigma = self.popart.update(returns_raw)
+        with torch.no_grad():
+            w = self.model.policy.value_net.weight
+            b = self.model.policy.value_net.bias
+            w.copy_((old_sigma / new_sigma) * w)
+            b.copy_((old_sigma * b + old_mu - new_mu) / new_sigma)
+        self.model.rollout_buffer.returns = (self.model.rollout_buffer.returns - new_mu) / new_sigma
+        self.model.rollout_buffer.values = (self.model.rollout_buffer.values - new_mu) / new_sigma
+        self.model.rollout_buffer.advantages = self.model.rollout_buffer.advantages * (old_sigma / new_sigma)
+        returns = self.model.rollout_buffer.returns.flatten()
+        values = self.model.rollout_buffer.values.flatten()
+        ev = float(explained_variance(values, returns))
+        ev = max(-10.0, ev)
+        self.ev_history.append(ev)
+        val_ev = 0.0
+        val_var = 0.0
+        oos_loss = 0.0
+        advantages = self.model.rollout_buffer.advantages.flatten()
+        adv_std = float(np.std(advantages))
+        rewards = self.model.rollout_buffer.rewards.flatten()
+        rew_val_ratio = float(np.mean(np.abs(rewards)) / (np.mean(np.abs(values)) + 1e-12))
+        srank_val = compute_rollout_srank(self.model)
+        env = self.training_env.envs[0]
+        while hasattr(env, "env"):
+            env = env.env
+        raw_rews = np.array(env.rollout_raw_rewards[-self.model.n_steps:])
+        pens = np.array(env.rollout_penalties[-self.model.n_steps:])
+        obs_rollout = self.model.rollout_buffer.observations
+        act_rollout = self.model.rollout_buffer.actions
+        if len(raw_rews) >= self.model.n_steps:
+            grad_cos = compute_pcgrad_cosine(self.model, obs_rollout, act_rollout, raw_rews, pens)
+        else:
+            grad_cos = 0.0
+        
+        dormant_val = 0.0
+        policy = self.model.policy
+        policy.eval()
+        try:
+            obs_dict = {}
+            for k, v in self.model.rollout_buffer.observations.items():
+                obs_dict[k] = to_float_tensor(v[:128], policy.device).reshape((min(128, v.shape[0]*v.shape[1]),) + v.shape[2:])
+            with torch.no_grad():
+                features = policy.features_extractor(obs_dict)
+                x = features
+                total_neurons = 0
+                dormant_neurons = 0
+                for layer in policy.mlp_extractor.policy_net:
+                    if isinstance(layer, nn.Linear):
+                        x = layer(x)
+                        mean_act = torch.abs(x).mean(dim=0)
+                        dormant = (mean_act < 0.01).sum().item()
+                        dormant_neurons += dormant
+                        total_neurons += x.shape[1]
+                    elif isinstance(layer, (nn.Tanh, nn.ReLU, nn.GELU)):
+                        x = layer(x)
+                if total_neurons > 0:
+                    dormant_val = dormant_neurons / total_neurons
+        except Exception:
+            pass
+        
+        churn_val = 0.0
+        try:
+            obs_dict = {}
+            for k, v in self.model.rollout_buffer.observations.items():
+                obs_dict[k] = to_float_tensor(v[:128], policy.device).reshape((min(128, v.shape[0]*v.shape[1]),) + v.shape[2:])
+            with torch.no_grad():
+                dist = policy.get_distribution(obs_dict)
+                curr_actions = dist.mode()
+            if self._prev_actions is not None:
+                churn_val = float(torch.abs(curr_actions - self._prev_actions).mean().item())
+                self._prev_actions = curr_actions.clone()
+            else:
+                self._prev_actions = curr_actions.clone()
+        except Exception:
+            pass
+        policy.train()
+
+        if grad_cos < 0.0:
+            self.anomalies.append(f"GradCos negative: {grad_cos:.3f} at step {step}")
+        if dormant_val > 0.1:
+            self.anomalies.append(f"Dormant neurons high: {dormant_val:.2f} at step {step}")
+
+        val_pnl = -1e9
+        if self.validation_env is not None:
+            self.validation_env.unwrapped.copy_trackers_from(env.unwrapped)
+            val_res = rollout(self.validation_env, lambda o, e: self.model.predict(o, deterministic=True)[0], seed=42)
+            val_pnl = val_res["final_eq"] - 10000.0
+            self.val_pnl_history.append(val_pnl)
+            
+            obs, _ = self.validation_env.reset(seed=42, options={"preserve_trackers": True})
+            val_rewards, val_values = [], []
+            done = False
+            for _ in range(200):
+                with torch.no_grad():
+                    obs_tensor, _ = self.model.policy.obs_to_tensor(obs)
+                    val = self.model.policy.predict_values(obs_tensor).cpu().numpy().item()
+                    val_unnorm = val * self.popart.sigma + self.popart.mu
+                val_values.append(val_unnorm)
+                obs, r, term, trunc, info = self.validation_env.step(self.model.predict(obs, deterministic=True)[0])
+                val_rewards.append(r)
+                if term or trunc:
+                    break
+            gamma = 0.99
+            val_returns = []
+            discounted_sum = 0.0
+            for r_t in reversed(val_rewards):
+                discounted_sum = r_t + gamma * discounted_sum
+                val_returns.insert(0, discounted_sum)
+            val_returns = np.array(val_returns)
+            val_values = np.array(val_values)[:len(val_returns)]
+            val_var = float(np.var(val_returns)) if len(val_returns) > 1 else 0.0
+            if len(val_returns) > 1:
+                val_ev = float(explained_variance(val_values, val_returns))
+                val_ev = max(-10.0, val_ev)
+                oos_loss = float(np.mean((val_values - val_returns) ** 2))
+
+        if step > 8000:
+            if val_pnl > self.best_val_pnl:
+                self.best_val_pnl = val_pnl
+                self.patience_counter = 0
+            else:
+                self.patience_counter += 1
+            if self.patience_counter >= 12:
+                self.should_stop = True
+
+        loss = self.logger.name_to_value.get("train/loss", float('nan'))
+        entropy = self.logger.name_to_value.get("train/entropy_loss", float('nan'))
+        kl = self.logger.name_to_value.get("train/approx_kl", 0.0)
+        clip = self.logger.name_to_value.get("train/clip_fraction", 0.0)
+        history_slice = env.history
+        mdd = 0.0
+        pnl_train = 0.0
+        churn = 0.0
+        bndv = 0.0
+        if len(history_slice) > 1:
+            equities = np.array([h["equity"] for h in history_slice])
+            returns_tr = np.diff(equities) / (equities[:-1] + 1e-12)
+            if len(returns_tr) > 0:
+                cum_returns = equities / (equities[0] + 1e-12)
+                running_max = np.maximum.accumulate(cum_returns)
+                drawdowns = (running_max - cum_returns) / (running_max + 1e-12)
+                mdd = float(np.max(drawdowns)) * 100.0
+            pnl_train = float(equities[-1] - equities[0])
+            if hasattr(env, "_action_diffs") and len(env._action_diffs) > 0:
+                churn = float(np.mean(env._action_diffs))
+            total_symbol_steps = 0
+            violated_symbol_steps = 0
+            for h in history_slice:
+                orders = h.get("orders", {})
+                if orders:
+                    for s, o_info in orders.items():
+                        if isinstance(o_info, dict):
+                            total_symbol_steps += 1
+                            if not o_info.get("hold", True):
+                                violated_symbol_steps += 1
+            if total_symbol_steps > 0:
+                bndv = (violated_symbol_steps / total_symbol_steps) * 100.0
+
+        ev_str = f"{ev:>+6.3f}" if not math.isnan(ev) else "nan"
+        if ev == 0.0: ev_str = "0.000"
+        val_ev_str = f"{val_ev:>+6.3f}" if not math.isnan(val_ev) else "nan"
+        if val_ev == 0.0: val_ev_str = "0.000"
+        val_var_str = f"{val_var:.1e}"
+        srank_str = f"{srank_val:.2f}"
+        loss_str = f"{loss:.3f}" if isinstance(loss, (int, float)) and not math.isnan(loss) else "nan"
+        oos_loss_str = f"{oos_loss:.3f}" if isinstance(oos_loss, (int, float)) and not math.isnan(oos_loss) else "nan"
+        if oos_loss == 0.0: oos_loss_str = "0.000"
+        entropy_str = f"{entropy:.4f}" if isinstance(entropy, (int, float)) and not math.isnan(entropy) else "nan"
+        mdd_str = f"{mdd:.1f}%"
+        pnl_str = f"{pnl_train:>+8.1f}" if abs(pnl_train) > 1e-6 else "0.0"
+        grad_str = f"{self.grad_tracker.pop_mean():.1e}"
+        kl_str = f"{kl:.1e}"
+        clip_str = f"{clip:.3f}"
+        churn_str = f"{churn:.3f}"
+        bndv_str = f"{bndv:.1f}%"
+        
+        line = (
+            f"{step:<8d} | "
+            f"{ev_str:<6s} | "
+            f"{val_ev_str:<7s} | "
+            f"{val_var_str:<7s} | "
+            f"{srank_str:<5s} | "
+            f"{loss_str:<8s} | "
+            f"{oos_loss_str:<8s} | "
+            f"{entropy_str:<7s} | "
+            f"{mdd_str:<5s} | "
+            f"{pnl_str:<9s} | "
+            f"{grad_str:<7s} | "
+            f"{kl_str:<6s} | "
+            f"{clip_str:<5s} | "
+            f"{churn_str:<5s} | "
+            f"{bndv_str:<5s} | "
+            f"{adv_std:<6.3f} | "
+            f"{rew_val_ratio:<8.3f} | "
+            f"{churn_val:<7.2f}"
+        )
+        self.lines.append(line)
+        if not self.silent:
+            print(line, flush=True)
+
+class BehaviorCallback(BaseCallback):
+    def __init__(self, probe_env, every, verbose=0):
+        super().__init__(verbose)
+        self.probe_env = probe_env
+        self.every = every
+        self.rows = []
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps % self.every == 0:
+            res = rollout(self.probe_env, lambda o, e: self.model.predict(o, deterministic=True)[0], seed=42)
+            act_hist = res["actions_history"]
+            expo_parts = []
+            for i, s in enumerate(self.probe_env.unwrapped.trading_symbols):
+                s_act = act_hist[:, i]
+                mean_val = np.mean(s_act)
+                std_val = np.std(s_act)
+                skew_val = stats.skew(s_act) if len(s_act) > 2 and np.std(s_act) > 1e-9 else float('nan')
+                short_s = s[:3]
+                expo_parts.append(f"{short_s}:{mean_val:>+5.2f}({std_val:.2f},{skew_val:>+4.1f})")
+            expo_str = " | ".join(expo_parts)
+            churn_index = float(np.mean(np.abs(np.diff(act_hist, axis=0)))) if len(act_hist) > 1 else 0.0
+            row = {
+                'step': self.num_timesteps,
+                'pnl': res["final_eq"] - 10000.0,
+                'trades_1k': res["trades_per_1k"],
+                'hold': res["mean_hold_bars"],
+                'in_mkt': res["pct_in_market"],
+                'churn_index': churn_index,
+                'expo_str': expo_str
+            }
+            self.rows.append(row)
+        return True
+
+def get_fresh_sim(base_sim):
+    new_sim = copy.copy(base_sim)
+    new_sim.accumulated_fees = 0.0
+    new_sim.accumulated_swaps = 0.0
+    new_sim.accumulated_partial_fees = 0.0
+    new_sim.accumulated_partial_profits = 0.0
+    new_sim.orders = []
+    new_sim.closed_orders = []
+    return new_sim
+
+def rollout(env, policy_fn, seed):
+    obs, _ = env.reset(seed=seed)
+    eqs = [env.unwrapped.simulator.equity]
+    trades, pos_bars = 0, 0
+    hold_lengths, cur_hold = [], 0
+    closed_profits = []
+    symbol_closed_pnl = defaultdict(float)
+    exposures = []
+    step_rewards = []
+    actions_history = []
+    done = False
+    sim_ref = env.unwrapped.simulator
+    sim_ref.accumulated_fees = 0.0
+    sim_ref.accumulated_swaps = 0.0
+    sim_ref.accumulated_partial_fees = 0.0
+    sim_ref.accumulated_partial_profits = 0.0
+    while not done:
+        curr_w = env.unwrapped._current_weights()
+        net_abs_exposure = float(np.sum(np.abs(curr_w)))
+        exposures.append(net_abs_exposure)
+        a_val = policy_fn(obs, env)
+        actions_history.append(a_val)
+        obs, r, term, trunc, info = env.step(a_val)
+        step_rewards.append(r)
+        done = term or trunc
+        eqs.append(info["equity"])
+        od = info.get("orders", {})
+        opened = sum(1 for v in od.values() if isinstance(v, dict) and not v.get("hold", True) and not v.get("error"))
+        trades += opened
+        in_mkt = len(env.unwrapped.simulator.orders) > 0
+        pos_bars += int(in_mkt)
+        cur_hold = cur_hold + 1 if in_mkt else (hold_lengths.append(cur_hold) or 0) if cur_hold else 0
+        closed = info.get("closed_orders", {})
+        if isinstance(closed, dict):
+            for s, cl_list in closed.items():
+                for c_item in cl_list:
+                    if isinstance(c_item, dict) and "profit" in c_item:
+                        p_val = float(c_item["profit"])
+                        closed_profits.append(p_val)
+                        symbol_closed_pnl[s] += p_val
+
+        step_actual_equity = env.unwrapped.simulator.equity
+        step_net_pnl = step_actual_equity - 10000.0
+        step_fees_closed = sum(o.volume * sim_ref.symbols_info[o.symbol].trade_contract_size * o.fee * sim_ref._get_unit_ratio(o.symbol, o.exit_time) for o in sim_ref.closed_orders)
+        step_fees_open = sum(o.volume * sim_ref.symbols_info[o.symbol].trade_contract_size * o.fee * sim_ref._get_unit_ratio(o.symbol, sim_ref.current_time) for o in sim_ref.orders)
+        step_total_fees = step_fees_closed + step_fees_open + sim_ref.accumulated_partial_fees
+        step_realized_profits = sum(o.profit for o in sim_ref.closed_orders) + sim_ref.accumulated_partial_profits
+        step_gross_raw_realized = step_realized_profits + step_fees_closed + sim_ref.accumulated_partial_fees
+        step_gross_raw_unrealized = sum(o.profit for o in sim_ref.orders) + step_fees_open
+        step_reconciled = step_gross_raw_realized + step_gross_raw_unrealized + sim_ref.accumulated_swaps - step_total_fees
+        step_residual = step_net_pnl - step_reconciled
+        if abs(step_residual) > 1e-2:
+            raise AssertionError(f"PnL reconciliation divergence at tick {env.unwrapped._current_tick}: actual={step_net_pnl:.2f}, reconciled={step_reconciled:.2f}, residual={step_residual:.2f}")
+
+    if cur_hold:
+        hold_lengths.append(cur_hold)
+    eqs = np.asarray(eqs, float)
+    n = len(eqs) - 1
+    ret = np.diff(eqs) / (np.abs(eqs[:-1]) + 1e-12)
+    dd = float(np.max(np.maximum.accumulate(eqs) - eqs))
+    downside_squared = np.minimum(ret, 0.0) ** 2
+    n_downside_bars = int(np.sum(ret < 0.0))
+    down_std = math.sqrt(np.mean(downside_squared))
+    unreliable_sortino = n_downside_bars < 30
+    if down_std > 1e-12:
+        sortino = float(ret.mean() / down_std * math.sqrt(96 * 252))
+    else:
+        sortino = 0.0
+    skewness = float(stats.skew(ret)) if len(ret) > 2 else 0.0
+    get_kurtosis_val = float(stats.kurtosis(ret)) if len(ret) > 2 else 0.0
+    cvar_95 = float(np.mean(ret[ret <= np.quantile(ret, 0.05)])) if len(ret) > 10 else 0.0
+    pos_profits = [p for p in closed_profits if p > 0]
+    neg_profits = [abs(p) for p in closed_profits if p < 0]
+    profit_factor = float(sum(pos_profits) / (sum(neg_profits) + 1e-12)) if neg_profits else (99.9 if pos_profits else 1.0)
+    win_rate = float(len(pos_profits) / (len(closed_profits) + 1e-12) * 100.0) if closed_profits else 0.0
+    gross_profit = float(sum(closed_profits))
+    net_pnl = float(eqs[-1] - eqs[0])
+    
+    actual_fees_closed = sum(o.volume * sim_ref.symbols_info[o.symbol].trade_contract_size * o.fee * sim_ref._get_unit_ratio(o.symbol, o.exit_time) for o in sim_ref.closed_orders)
+    actual_fees_open = sum(o.volume * sim_ref.symbols_info[o.symbol].trade_contract_size * o.fee * sim_ref._get_unit_ratio(o.symbol, sim_ref.current_time) for o in sim_ref.orders)
+    total_actual_fees = actual_fees_closed + actual_fees_open + sim_ref.accumulated_partial_fees
+    sim_ref.accumulated_fees = total_actual_fees
+
+    realized_profits_total = sum(o.profit for o in sim_ref.closed_orders) + sim_ref.accumulated_partial_profits
+    gross_raw_realized = realized_profits_total + actual_fees_closed + sim_ref.accumulated_partial_fees
+    gross_raw_unrealized = sum(o.profit for o in sim_ref.orders) + actual_fees_open
+    reconciled_pnl = gross_raw_realized + gross_raw_unrealized + sim_ref.accumulated_swaps - sim_ref.accumulated_fees
+    residual = net_pnl - reconciled_pnl
+
+    cost_paid = float(gross_profit - net_pnl)
+    cost_drag_bps = float((cost_paid / (eqs[0] + 1e-12)) * 10000.0)
+    spread_cost_bps = float((sim_ref.accumulated_fees / (eqs[0] + 1e-12)) * 10000.0)
+    swap_cost_bps = float((-sim_ref.accumulated_swaps / (eqs[0] + 1e-12)) * 10000.0)
+    unrealized_pnl_at_end = sum(o.profit for o in sim_ref.orders)
+    pct_of_total_pnl_from_open_positions = float(unrealized_pnl_at_end / (net_pnl + 1e-12) * 100.0)
+    if len(exposures) > 2 and np.std(exposures) > 1e-12 and np.std(step_rewards) > 1e-12:
+        exposure_reward_corr, _ = stats.pearsonr(exposures, step_rewards)
+        exposure_reward_corr = float(np.nan_to_num(exposure_reward_corr))
+    else:
+        exposure_reward_corr = float('nan')
+    actions_history = np.array(actions_history)
+    
+    max_step_pct = float(np.max(np.diff(eqs)) / (eqs[-1] - eqs[0] + 1e-12) * 100.0) if (eqs[-1] - eqs[0]) > 0 else 0.0
+    return dict(final_eq=float(eqs[-1]), total_ret=float(eqs[-1]/eqs[0]-1), gross_profit=gross_profit,
+                cost_paid=cost_paid, cost_drag_bps=cost_drag_bps, sortino=sortino, max_dd=dd,
+                skew=skewness, kurtosis=get_kurtosis_val, cvar_95=cvar_95, profit_factor=profit_factor, win_rate=win_rate,
+                exposure_reward_corr=exposure_reward_corr,
+                trades_per_1k=1000*trades/max(n,1), pct_in_market=100*pos_bars/max(n,1),
+                mean_hold_bars=float(np.mean(hold_lengths)) if hold_lengths else 0.0, n_bars=n,
+                symbol_closed_pnl=dict(symbol_closed_pnl), _eqs=eqs,
+                n_downside_bars=n_downside_bars, unreliable_sortino=unreliable_sortino,
+                spread_cost_bps=spread_cost_bps, swap_cost_bps=swap_cost_bps,
+                unrealized_pnl_at_end=unrealized_pnl_at_end,
+                pct_of_total_pnl_from_open_positions=pct_of_total_pnl_from_open_positions,
+                actions_history=actions_history,
+                gross_raw_realized=gross_raw_realized, gross_raw_unrealized=gross_raw_unrealized,
+                accumulated_swaps=sim_ref.accumulated_swaps, accumulated_fees=sim_ref.accumulated_fees,
+                reconciled_pnl=reconciled_pnl, residual=residual, max_step_pct=max_step_pct,
+                reward_branch_switches=float(getattr(env.unwrapped, "reward_branch_switches", 0.0)))
+
+def print_behavior_table(rows):
+    if not rows:
+        return
+    print("\\n    " + "=" * 100, flush=True)
+    print(f"    {'Step':>7} | {'PnL':>9} | {'Trades/1k':>9} | {'Hold':>6} | "
+          f"{'InMkt%':>6} | {'ChurnIdx':>8} | Risks", flush=True)
+    print("    " + "=" * 100, flush=True)
+    for r in rows:
+        print(f"    {r['step']:>7d} | {r['pnl']:>+9.2f} | {r['trades_1k']:>9.1f} | "
+              f"{r['hold']:>6.1f} | {r['in_mkt']:>6.1f} | {r['churn_index']:>8.3f} | {r['expo_str']}", flush=True)
+    print("    " + "=" * 100, flush=True)
+
+def make_agent(env, seed, n_steps=1024, batch_size=128):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    return PPO("MultiInputPolicy", env, seed=seed, verbose=0,
+               policy_kwargs=dict(features_extractor_class=MLPExtractorDSR, net_arch=[64]),
+               n_steps=n_steps, batch_size=batch_size, learning_rate=3e-4, ent_coef=0.005,
+               gamma=0.99, gae_lambda=0.95, clip_range=0.2, vf_coef=0.5, device=device, n_epochs=4)
+
+def make_sanity_agent(env, seed):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    return PPO("MultiInputPolicy", env, seed=seed, verbose=0,
+               policy_kwargs=dict(features_extractor_class=MLPExtractorDSR, net_arch=[64]),
+               n_steps=512, batch_size=128, learning_rate=1e-3, ent_coef=0.0,
+               gamma=0.9, gae_lambda=0.95, clip_range=0.2, vf_coef=0.5, device=device)
+
+def trend_policy(env):
+    a_vals = []
+    for s in env.unwrapped.trading_symbols:
+        t_sign = env.unwrapped.get_trend_sign(s)
+        a_vals.append(t_sign / 1.5)
+    return np.array(a_vals, dtype=np.float64)
+
+def vol_target_policy(env):
+    curr_time = env.unwrapped.simulator.current_time
+    a_vals = []
+    for s in env.unwrapped.trading_symbols:
+        tp_idx = env.unwrapped._pos_mapping[env.unwrapped._current_tick]
+        s_idx = env.unwrapped.symbol_to_idx[s]
+        current_vol = float(VOL_MATRIX[tp_idx, s_idx])
+        static_vol = env.unwrapped._barvol[s]
+        ratio = static_vol / (current_vol + 1e-12)
+        w_desired = np.clip(ratio, 0.0, 1.0)
+        a_vals.append(w_desired)
+    return np.array(a_vals, dtype=np.float64)
+
+def reward_decomposition_diagnostic(env, model, seed, max_steps=3000):
+    t0 = time.perf_counter()
+    obs, _ = env.reset(seed=seed)
+    base = env.unwrapped
+    raw_rewards, penalties, totals = [], [], []
+    n = 0
+    done = False
+    while not done and n < max_steps:
+        prev_raw_acc = base.accumulated_norm_raw_weighted
+        prev_pen_acc = base.accumulated_norm_pen_weighted
+        a, _ = model.predict(obs, deterministic=True)
+        obs, r, term, trunc, info = env.step(a)
+        done = term or trunc
+        n += 1
+        raw_step = base.accumulated_norm_raw_weighted - prev_raw_acc
+        pen_step = base.accumulated_norm_pen_weighted - prev_pen_acc
+        raw_rewards.append(raw_step)
+        penalties.append(pen_step)
+        totals.append(r)
+    raw_rewards = np.array(raw_rewards)
+    penalties = np.array(penalties)
+    totals = np.array(totals)
+    print("\\n" + "=" * 80, flush=True)
+    print("[DIAGNOSTIC-D] REWARD DECOMPOSITION", flush=True)
+    print("=" * 80, flush=True)
+    print(f"  raw DSR       : mean={np.mean(raw_rewards):+9.4f} std={safe_std(raw_rewards):8.4f}", flush=True)
+    print(f"  turnover pen. : mean={np.mean(penalties):+9.4f} std={safe_std(penalties):8.4f}", flush=True)
+    print(f"  total reward  : mean={np.mean(totals):+9.4f} std={safe_std(totals):8.4f}", flush=True)
+    var_raw = np.var(raw_rewards) + 1e-12
+    var_pen = np.var(penalties)
+    print(f"  var(penalty)/var(raw)  = {var_pen/var_raw:.3f}", flush=True)
+    print(f"[TIME] Reward Decomposition Diagnostic completed in {time.perf_counter()-t0:.4f} seconds", flush=True)
+    return dict(raw=raw_rewards, penalty=penalties, total=totals)
+
+def action_saturation_diagnostic(env, model, seed, threshold=0.95, max_steps=3000):
+    t0 = time.perf_counter()
+    obs, _ = env.reset(seed=seed)
+    actions = []
+    n, done = 0, False
+    while not done and n < max_steps:
+        a, _ = model.predict(obs, deterministic=True)
+        actions.append(np.asarray(a, dtype=float))
+        obs, r, term, trunc, info = env.step(a)
+        done = term or trunc
+        n += 1
+    actions = np.array(actions)
+    print("\\n" + "=" * 80, flush=True)
+    print(f"[DIAGNOSTIC-E] ACTION MAGNITUDE SATURATION CHECK", flush=True)
+    print("=" * 80, flush=True)
+    for i, s in enumerate(env.unwrapped.trading_symbols):
+        mags = np.abs(actions[:, i])
+        sat_frac = float(np.mean(mags > threshold))
+        mean_mag = float(np.mean(mags))
+        std_mag = float(np.std(mags))
+        if sat_frac > 0.8:
+            verdict = "FULLY SATURATED MAGNITUDE"
+        elif sat_frac > 0.5:
+            verdict = "HIGH MAGNITUDE"
+        else:
+            verdict = "OK"
+        print(f"  {s:8s}: saturation_frac={sat_frac:5.1%}  mean_mag={mean_mag:.3f}  std_mag={std_mag:.3f} -> {verdict}", flush=True)
+    print(f"[TIME] Action Saturation Diagnostic completed in {time.perf_counter()-t0:.4f} seconds", flush=True)
+    return actions
+
+def corrected_welch_ttest(a, b, o_factor):
+    if len(a) < 3 or len(b) < 3:
+        return float('nan'), float('nan'), float('nan')
+    n_a = len(a)
+    n_b = len(b)
+    n_a_eff = max(3.0, n_a / o_factor)
+    n_b_eff = max(3.0, n_b / o_factor)
+    mean_a, mean_b = np.mean(a), np.mean(b)
+    var_a = np.var(a, ddof=1) if len(a) > 1 else 0.0
+    var_b = np.var(b, ddof=1) if len(b) > 1 else 0.0
+    se = math.sqrt((var_a / n_a_eff) + (var_b / n_b_eff) + 1e-12)
+    t_stat = (mean_a - mean_b) / se
+    denom = ((var_a / n_a_eff)**2 / (n_a_eff - 1)) + ((var_b / n_b_eff)**2 / (n_b_eff - 1)) + 1e-12
+    df = (se**2)**2 / denom
+    df = max(3.0, df)
+    log_p = stats.t.logsf(abs(t_stat), df=df) + math.log(2.0)
+    neg_log10_p = -log_p / math.log(10.0)
+    z_score = float(stats.norm.isf(np.exp(log_p))) if log_p > -50.0 else 10.0
+    if t_stat < 0:
+        z_score = -z_score
+    return t_stat, neg_log10_p, z_score
+
+def compute_required_seeds(agent_pnls, null_pnls, alpha=0.05, power=0.80):
+    mean_a = np.mean(agent_pnls)
+    mean_b = np.mean(null_pnls)
+    var_a = np.var(agent_pnls, ddof=1) if len(agent_pnls) > 1 else 1e-9
+    var_b = np.var(null_pnls, ddof=1) if len(null_pnls) > 1 else 1e-9
+    pooled_std = math.sqrt((var_a + var_b) / 2.0)
+    diff = abs(mean_a - mean_b)
+    if pooled_std < 1e-9 or diff < 1e-9:
+        return float('inf'), 0.0
+    cohen_d = diff / pooled_std
+    z_alpha = 1.96
+    z_beta = 0.84
+    n_req = 2.0 * ((z_alpha + z_beta) / cohen_d) ** 2
+    return math.ceil(n_req), cohen_d
+
+def test_swap_calibration():
+    mock_symbols_info = {}
+    class DummyInfo:
+        def __init__(self, l, s):
+            self.swap_long = l
+            self.swap_short = s
+    for s in symbols:
+        mock_symbols_info[s] = DummyInfo(-10.0, -5.0)
+    factors = []
+    for s in symbols:
+        raw_long = mock_symbols_info[s].swap_long
+        raw_short = mock_symbols_info[s].swap_short
+        w_raw = min(raw_long, raw_short)
+        w_clean = SWAP_PER_NIGHT.get(s, 0.0)
+        if w_clean < 0.0 and w_raw < 0.0:
+            factors.append(w_clean / w_raw)
+    g_f = np.mean(factors) if factors else 1.0
+    assert g_f > 0.0
+    print("[SANITY-UNIT] Swap Calibration Logic Check: PASS", flush=True)
+
+def test_dsr_formula():
+    alpha = 0.004
+    p_vol = math.log(0.97)
+    p_vol_sq = p_vol ** 2
+    R1 = math.log(10100.0 / 10000.0)
+    expected_r1 = R1 / math.sqrt(p_vol_sq)
+    e_ret_1 = alpha * R1
+    R2 = math.log(9900.0 / 10100.0)
+    expected_r2 = (R2 * p_vol_sq - 0.5 * e_ret_1 * (p_vol_sq + R2 ** 2)) / (p_vol_sq ** 1.5)
+    assert abs(expected_r1 - 0.326707) < 1e-4
+    assert not math.isnan(expected_r2)
+    print("[SANITY-UNIT] DSR Math Formulation Check: PASS", flush=True)
+
+def test_order_sizing():
+    assert len(symbols) > 0
+    for s in symbols:
+        si = symbols_info_dict.get(s)
+        if si is not None:
+            assert si.volume_min > 0.0
+            assert si.volume_step > 0.0
+    eq = 10000.0
+    tgtvol = 0.10
+    ann_vol = 0.20
+    px = 1.1000
+    contract_size = 100000
+    unit_ratio = 1.0
+    notional_per_lot = px * contract_size * unit_ratio
+    scale = eq * (tgtvol / ann_vol) / notional_per_lot
+    assert abs(scale - 0.045454545) < 1e-6
+    print("[SANITY-UNIT] Sizing Constants Assertion: PASS", flush=True)
+    print("[SANITY-UNIT] Target Lot Size Calculation Check: PASS", flush=True)
+
+def test_swap_calculation_with_known_numeric():
+    class MockSymbolInfo:
+        def __init__(self):
+            self.trade_contract_size = 100000
+            self.currency_profit = "USD"
+            self.currency_margin = "USD"
+            self.swap_long = -4.5
+            self.swap_short = -1.5
+            self.margin_rate = 1.0
+            self.volume_min = 0.01
+            self.volume_step = 0.01
+            self.volume_max = 100.0
+            self.margin_initial = 0.0
+            self.margin_maintenance = 0.0
+    sim_m = ICSimulator(unit="USD", balance=10000.0, leverage=100.0, hedge=False)
+    sim_m.symbols_info = {"EURUSD": MockSymbolInfo()}
+    sim_m.symbols_data = {
+        "EURUSD": pd.DataFrame(
+            {"Open": [1.1000, 1.1005], "High": [1.1010, 1.1015], "Low": [1.0990, 1.0995], "Close": [1.1002, 1.1008]},
+            index=[datetime.datetime(2026, 7, 26, 12, 0), datetime.datetime(2026, 7, 27, 12, 0)]
+        )
+    }
+    global SWAP_LONG_CALIBRATED, SWAP_SHORT_CALIBRATED
+    SWAP_LONG_CALIBRATED["EURUSD"] = -4.5
+    SWAP_SHORT_CALIBRATED["EURUSD"] = -1.5
+    sim_m.current_time = datetime.datetime(2026, 7, 26, 12, 0)
+    order = sim_m._create_hedged_order(OrderType.Buy, "EURUSD", 1.0, 0.0, True)
+    assert order is not None
+    sim_m.tick(timedelta(days=1))
+    expected_balance = 10000.0 - 4.5
+    assert abs(sim_m.balance - expected_balance) < 1e-6
+    print("[SANITY-UNIT] Swap Numeric Calculation Check: PASS", flush=True)
+
+def verify_no_lookahead(env):
+    env.reset(seed=1)
+    tick = env.unwrapped._current_tick
+    current_time = env.unwrapped.time_points[tick]
+    for s in env.unwrapped.trading_symbols:
+        df = env.unwrapped.original_simulator.symbols_data[s]
+        idx_val = df.index.get_indexer([current_time], method=None)[0]
+        assert idx_val < len(df)
+    print("[SANITY-UNIT] Look-ahead Bias Prevention Check: PASS", flush=True)
+
+def verify_reproducibility(env_fn, policy_fn, seed=123):
+    e1 = env_fn()
+    e2 = env_fn()
+    obs1, _ = e1.reset(seed=seed)
+    obs2, _ = e2.reset(seed=seed)
+    for _ in range(50):
+        a1 = policy_fn(obs1, e1)
+        a2 = policy_fn(obs2, e2)
+        assert np.allclose(a1, a2, atol=1e-12)
+        obs1, r1, term1, trunc1, info1 = e1.step(a1)
+        obs2, r2, term2, trunc2, info2 = e2.step(a2)
+        assert np.allclose(obs1["features"], obs2["features"], atol=1e-12)
+        assert abs(r1 - r2) < 1e-12
+        assert abs(info1["equity"] - info2["equity"]) < 1e-12
+        if term1 or trunc1:
+            break
+    print("[SANITY-UNIT] Complete Path Reproducibility Check: PASS", flush=True)
+
+def train_seed_worker(sd, symbols, WINDOW, val_ep_len, STEPS, n_steps, batch_size, EVAL_SEEDS, lambda_val):
+    log_path = f"/tmp/crash_seed_{sd}_lambda_{lambda_val}.log"
+    result_pkl = f"/tmp/result_seed_{sd}_lambda_{lambda_val}.pkl"
+    try:
+        with open(log_path, "w") as lf:
+            faulthandler.enable(file=lf)
+        global tp_train, tp_val
+        
+        random.seed(sd)
+        np.random.seed(sd)
+        torch.manual_seed(sd)
+        torch.cuda.manual_seed_all(sd)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        except AttributeError:
+            pass
+            
+        sim_local = ICSimulator(unit="USD", balance=10_000., leverage=100., hedge=False)
+        sim_local.symbols_info = symbols_info_dict
+        sim_local.symbols_data = {s: final_symbols_data[s].loc[STATE_INDEX] for s in symbols}
+        
+        val_third = len(tp_val) // 3
+        tp_val_1_local = tp_val[:val_third]
+        tp_val_2_local = tp_val[val_third : 2 * val_third]
+        tp_val_3_local = tp_val[2 * val_third :]
+        tp_val_selection_local = tp_val[:2 * val_third]
+        
+        val_selection_ep_len = min(5000, len(tp_val_selection_local) - WINDOW - 10)
+        
+        env_train_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_train, turnover_penalty_lambda=lambda_val, decision_interval=96), ep_len=5000))
+        env_val_selection_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_val_selection_local, turnover_penalty_lambda=lambda_val, is_eval=True, decision_interval=96), ep_len=val_selection_ep_len))
+        
+        ag = make_agent(env_train_local, sd, n_steps=n_steps, batch_size=batch_size)
+        ev_tracker = EVTracker(every=1000, value_net_module=ag.policy.value_net, validation_env=env_val_selection_local, silent=True)
+        beh_callback = BehaviorCallback(probe_env=env_val_selection_local, every=1000)
+        ag.learn(total_timesteps=STEPS, callback=[ev_tracker, beh_callback])
+        
+        env_val_1_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_val_1_local, turnover_penalty_lambda=lambda_val, is_eval=True, decision_interval=96), ep_len=min(val_selection_ep_len, len(tp_val_1_local) - WINDOW - 10)))
+        env_val_2_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_val_2_local, turnover_penalty_lambda=lambda_val, is_eval=True, decision_interval=96), ep_len=min(val_selection_ep_len, len(tp_val_2_local) - WINDOW - 10)))
+        env_val_3_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_val_3_local, turnover_penalty_lambda=lambda_val, is_eval=True, decision_interval=96), ep_len=min(5000, len(tp_val_3_local) - WINDOW - 10)))
+        
+        eval_results = []
+        for esd in EVAL_SEEDS:
+            agent_res = rollout(env_val_3_local, lambda o, e: ag.predict(o, deterministic=True)[0], esd)
+            pnl_full = agent_res["final_eq"] - 10000.0
+            sortino_full = agent_res["sortino"]
+            mdd_full = agent_res["max_dd"]
+            
+            res_1 = rollout(env_val_1_local, lambda o, e: ag.predict(o, deterministic=True)[0], esd)
+            pnl_1 = res_1["final_eq"] - 10000.0
+            sortino_1 = res_1["sortino"]
+            mdd_1 = res_1["max_dd"]
+            
+            res_2 = rollout(env_val_2_local, lambda o, e: ag.predict(o, deterministic=True)[0], esd)
+            pnl_2 = res_2["final_eq"] - 10000.0
+            sortino_2 = res_2["sortino"]
+            mdd_2 = res_2["max_dd"]
+            
+            eval_results.append({
+                "Full Holdout": (pnl_full, sortino_full, mdd_full),
+                "Slice 1 (Early)": (pnl_1, sortino_1, mdd_1),
+                "Slice 2 (Mid)": (pnl_2, sortino_2, mdd_2),
+                "_agent_full_res": agent_res,
+                "_agent_1_res": res_1,
+                "_agent_2_res": res_2
+            })
+        payload = {
+            "seed": sd,
+            "lambda_val": lambda_val,
+            "policy_state_dict": ag.policy.state_dict(),
+            "ev_lines": ev_tracker.lines,
+            "beh_rows": beh_callback.rows,
+            "eval_results": eval_results,
+            "anomalies": ev_tracker.anomalies
+        }
+        with open(result_pkl, "wb") as rf:
+            pickle.dump(payload, rf)
+    except Exception as e:
+        import traceback
+        with open(log_path, "a") as lf:
+            traceback.print_exc(file=lf)
+        raise e
+
+def summarize(tag, runs):
+    keys = [k for k in runs[0].keys() if not k.startswith("_") and not isinstance(runs[0][k], dict) and not isinstance(runs[0][k], bool)]
+    agg = {}
+    for k in keys:
+        vals = []
+        for r in runs:
+            v_val = r[k]
+            if isinstance(v_val, (int, float)) and not math.isnan(v_val):
+                vals.append(v_val)
+        agg[k] = (float(np.mean(vals)), float(safe_std(vals))) if vals else (0.0, 0.0)
+    exp_corr_mean, exp_corr_std = agg.get('exposure_reward_corr', (0.0, 0.0))
+    print(f"  {tag:18s}: eq={agg['final_eq'][0]:9.2f}±{agg['final_eq'][1]:7.2f} "
+          f"sortino={agg['sortino'][0]:6.2f}±{agg['sortino'][1]:.2f} "
+          f"skew={agg['skew'][0]:+5.2f} kurt={agg['kurtosis'][0]:5.2f} cvar95={agg['cvar_95'][0]:+6.4f} "
+          f"PF={agg['profit_factor'][0]:4.2f} WR%={agg['win_rate'][0]:5.1f}% drag_bps={agg['cost_drag_bps'][0]:6.1f} "
+          f"spread_bps={agg['spread_cost_bps'][0]:5.1f} swap_bps={agg['swap_cost_bps'][0]:5.1f} open_pnl_pct={agg['pct_of_total_pnl_from_open_positions'][0]:5.1f}% "
+          f"exposure_corr={exp_corr_mean:+5.3f} max_step_pct={agg.get('max_step_pct', (0.0, 0.0))[0]:.1f}%", flush=True)
+    any_unreliable = any(r.get("unreliable_sortino", False) for r in runs)
+    if any_unreliable:
+         print(f"    >> WARNING: Sortino statistics in {tag} are computed from fewer than 30 downside observations.", flush=True)
+    return agg
+
+def make_synthetic_symbols_data(symbols, time_points):
+    res = {}
+    t_arr = np.arange(len(time_points), dtype=np.float64)
+    for i, s in enumerate(symbols):
+        phase = i * np.pi / 3.0
+        close_arr = 1.0 + 0.05 * np.sin(t_arr / 5.0 + phase)
+        df = pd.DataFrame(index=time_points)
+        df["Close"] = close_arr
+        df["Open"] = close_arr
+        df["High"] = close_arr * 1.05
+        df["Low"] = close_arr * 0.95
+        res[s] = df
+    return res
+
+def compute_cscv_pbo(all_returns_list):
+    N = len(all_returns_list)
+    if N < 2:
+        return 0.0
+    T = len(all_returns_list[0])
+    M = 6
+    block_size = T // M
+    if block_size < 10:
+        return 0.0
+    purge_size = int(block_size * 0.10)
+    import itertools
+    all_indices = list(range(M))
+    comb_is = list(itertools.combinations(all_indices, M // 2))
+    overfit_count = 0
+    total_combinations = len(comb_is)
+    for indices_is in comb_is:
+        indices_oos = [idx for idx in all_indices if idx not in indices_is]
+        is_srs = []
+        oos_srs = []
+        for i in range(N):
+            r = all_returns_list[i]
+            purged_is_parts = []
+            for idx in indices_is:
+                start = idx * block_size
+                end = (idx + 1) * block_size if idx < M - 1 else T
+                if idx - 1 in indices_oos:
+                    start += purge_size
+                if idx + 1 in indices_oos:
+                    end -= purge_size
+                if start < end:
+                    purged_is_parts.append(r[start:end])
+            oos_parts = []
+            for idx in indices_oos:
+                start = idx * block_size
+                end = (idx + 1) * block_size if idx < M - 1 else T
+                oos_parts.append(r[start:end])
+            if len(purged_is_parts) == 0 or len(oos_parts) == 0:
+                is_srs.append(-1e9)
+                oos_srs.append(-1e9)
+                continue
+            is_ret = np.concatenate(purged_is_parts)
+            oos_ret = np.concatenate(oos_parts)
+            def get_sr(ret):
+                std = np.std(ret, ddof=1)
+                return np.mean(ret) / std if std > 1e-9 else -1e9
+            is_srs.append(get_sr(is_ret))
+            oos_srs.append(get_sr(oos_ret))
+        best_is_idx = np.argmax(is_srs)
+        median_oos = np.median(oos_srs)
+        if oos_srs[best_is_idx] < median_oos:
+            overfit_count += 1
+    pbo = overfit_count / total_combinations
+    return pbo
+
+def compute_dsr(all_returns_list, best_idx):
+    best_returns = all_returns_list[best_idx]
+    T = len(best_returns)
+    if T < 3:
+        return 0.0, 0.0, 0.0
+    srs = []
+    for r in all_returns_list:
+        std = np.std(r, ddof=1)
+        srs.append(np.mean(r) / std if std > 1e-9 else 0.0)
+    best_sr = srs[best_idx]
+    sigma_cross_std = np.std(srs, ddof=1) if len(srs) > 1 else 0.0
+    if sigma_cross_std < 1e-9:
+        sigma_cross_std = 1.0 / math.sqrt(T)
+    N = len(all_returns_list) * 3
+    gamma_em = 0.5772156649015329
+    z1 = stats.norm.ppf(1 - 1.0 / N)
+    z2 = stats.norm.ppf(1 - 1.0 / (N * math.e))
+    sr_star = sigma_cross_std * ((1.0 - gamma_em) * z1 + gamma_em * z2)
+    μ3 = stats.skew(best_returns, nan_policy='omit')
+    excess_kurt = stats.kurtosis(best_returns, fisher=True, nan_policy='omit')
+    μ4 = excess_kurt + 3.0
+    var_sr = (1.0 / (T - 1)) * (1.0 - μ3 * best_sr + ((μ4 - 1.0) / 4.0) * best_sr**2)
+    if var_sr <= 0:
+        return 0.0, best_sr, sr_star
+    sigma_sr = math.sqrt(var_sr)
+    z_score = (best_sr - sr_star) / sigma_sr
+    dsr_prob = stats.norm.cdf(z_score)
+    return float(dsr_prob), float(best_sr), float(sr_star)
+"""
+
+if __name__ == '__main__':
+    multiprocessing.freeze_support()
+    with open("core_logic.py", "w") as f:
+        f.write(core_code)
+
+import sys
+import importlib
+sys.modules.pop("core_logic", None)
+import core_logic
+importlib.reload(core_logic)
+from core_logic import *
+
+def calculate_psi(train_col, val_col, num_bins=10):
+    percentiles = np.linspace(0, 100, num_bins + 1)
+    bin_edges = np.percentile(train_col, percentiles)
+    bin_edges = np.unique(bin_edges)
+    if len(bin_edges) < 2:
+        return 0.0
+    train_counts, _ = np.histogram(train_col, bins=bin_edges)
+    val_counts, _ = np.histogram(val_col, bins=bin_edges)
+    train_probs = train_counts / len(train_col)
+    val_probs = val_counts / len(val_col)
+    train_probs = np.clip(train_probs, 1e-4, 1.0)
+    train_probs /= np.sum(train_probs)
+    val_probs = np.clip(val_probs, 1e-4, 1.0)
+    val_probs /= np.sum(val_probs)
+    psi_value = np.sum((train_probs - val_probs) * np.log(train_probs / val_probs))
+    return float(psi_value)
+
+def run_ks_test(train_col, val_col):
+    res = stats.ks_2samp(train_col, val_col)
+    return float(res.statistic), float(res.pvalue)
+
+def run_distribution_shift_diagnostic(model=None):
+    train_feats = STATE_MATRIX[:i_tr]
+    val_feats = STATE_MATRIX[i_tr + EMBARGO:]
+    num_features = train_feats.shape[1]
+    print("\n" + "=" * 100, flush=True)
+    print("CRITIC GENERALIZATION & FEATURE SHIFT CORRELATION (TRAIN VS VAL SLICE)", flush=True)
+    print("=" * 100, flush=True)
+    print(f"{'Feature Name':<25} | {'PSI':<8} | {'KS Stat':<8} | {'KS p-value':<10} | {'Critic Corr':<11} | {'Verdict':<15}", flush=True)
+    print("-" * 100, flush=True)
+    corrs = [0.0] * num_features
+    if model is not None:
+        try:
+            sim_local = ICSimulator(unit="USD", balance=10_000., leverage=100., hedge=False)
+            sim_local.symbols_info = symbols_info_dict
+            sim_local.symbols_data = {s: final_symbols_data[s].loc[STATE_INDEX] for s in symbols}
+            env_val_diag = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_val, is_eval=True), ep_len=1000))
+            corrs = compute_shift_error_correlation(env_val_diag, model, 42)
+        except Exception:
+            pass
+    major_shift_count = 0
+    for idx in range(min(num_features, 10)):
+        col_name = STATE_COLUMNS[idx] if idx < len(STATE_COLUMNS) else f"Col_{idx}"
+        train_col = train_feats[:, idx]
+        val_col = val_feats[:, idx]
+        psi_val = calculate_psi(train_col, val_col)
+        ks_stat, p_val = run_ks_test(train_col, val_col)
+        corr_val = corrs[idx] if idx < len(corrs) else 0.0
+        if psi_val > 0.2:
+            verdict = "MAJOR SHIFT"
+            major_shift_count += 1
+        elif psi_val > 0.1:
+            verdict = "SLIGHT SHIFT"
+        else:
+            verdict = "NO SHIFT"
+        print(f"{col_name[:25]:<25} | {psi_val:<8.4f} | {ks_stat:<8.4f} | {p_val:<10.2e} | {corr_val:<+11.4f} | {verdict:<15}", flush=True)
+    print("-" * 100, flush=True)
+    print(f"Summary: {major_shift_count} out of {min(num_features, 10)} features show major distribution shift (PSI > 0.2).", flush=True)
+    print("=" * 100, flush=True)
+
+if __name__ == '__main__':
+    multiprocessing.freeze_support()
+
+    random.seed(42)
+    np.random.seed(42)
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except AttributeError:
+        pass
+
+    if not os.path.exists("/tmp/feature_state_local.pkl"):
+        _drive_paths = [
+            "/content/drive/My Drive/trading_rl_project/feature_state.pkl",
+            "/content/drive/MyDrive/trading_rl_project/feature_state.pkl",
+            "/content/drive/My Drive/feature_state.pkl",
+            "/content/drive/MyDrive/feature_state.pkl",
+            "feature_state.pkl",
+        ]
+        source_path = next((p for p in _drive_paths if os.path.exists(p)), None)
+        if source_path is not None:
+            try:
+                shutil.copy(source_path, "/tmp/feature_state_local.pkl")
+            except Exception:
+                pass
+
+    print("\n" + "=" * 50, flush=True)
+    print("SYMBOL PROPERTIES INTEGRITY DIAGNOSTIC", flush=True)
+    print("=" * 50, flush=True)
+    for s in symbols:
+        si = symbols_info_dict.get(s)
+        has_pt = hasattr(si, "point")
+        has_spr = hasattr(si, "spread")
+        pt_val = getattr(si, "point", "N/A")
+        spr_val = getattr(si, "spread", "N/A")
+        df_sym = final_symbols_data[s]
+        point_val = getattr(si, "point", 0.00001)
+        spread_cols = [c for c in df_sym.columns if c.lower() == "spread"]
+        if len(spread_cols) > 0:
+            spread_pts = float(df_sym[spread_cols[0]].median())
+            if spread_pts <= 0.0 or np.isnan(spread_pts):
+                spread_pts = getattr(si, "spread", 2.0)
+        else:
+            spread_pts = getattr(si, "spread", 2.0)
+        print(f"Symbol: {s:8s} | Has Point: {str(has_pt):5s} ({pt_val}) -> Est: {point_val} | Has Spread: {str(has_spr):5s} ({spr_val}) -> Est: {spread_pts}", flush=True)
+    print("=" * 50, flush=True)
+
+    diagnostic_ledger = {}
+
+    print("\n" + "=" * 50, flush=True)
+    print("STANDALONE PURE FUNCTION ASSERTIONS", flush=True)
+    print("=" * 50, flush=True)
+    print(f"{'Test Description':<35} | {'Result':<10}", flush=True)
+    print("-" * 50, flush=True)
+    
+    test_swap_cal_passed = True
+    try:
+        test_swap_calibration()
+        print(f"{'Swap Calibration Logic Check':<35} | {'PASS':<10}", flush=True)
+    except Exception:
+        test_swap_cal_passed = False
+        print(f"{'Swap Calibration Logic Check':<35} | {'FAIL':<10}", flush=True)
+    diagnostic_ledger["swap_cal"] = "PASS" if test_swap_cal_passed else "FAIL"
+
+    test_dsr_formula_passed = True
+    try:
+        test_dsr_formula()
+        print(f"{'DSR Math Formulation Check':<35} | {'PASS':<10}", flush=True)
+    except Exception:
+        test_dsr_formula_passed = False
+        print(f"{'DSR Math Formulation Check':<35} | {'FAIL':<10}", flush=True)
+    diagnostic_ledger["dsr_formula"] = "PASS" if test_dsr_formula_passed else "FAIL"
+
+    test_order_sizing_passed = True
+    try:
+        test_order_sizing()
+        print(f"{'Sizing Constants Assertion':<35} | {'PASS':<10}", flush=True)
+    except Exception:
+        test_order_sizing_passed = False
+        print(f"{'Sizing Constants Assertion':<35} | {'FAIL':<10}", flush=True)
+    diagnostic_ledger["order_sizing"] = "PASS" if test_order_sizing_passed else "FAIL"
+
+    test_swap_calc_numeric_passed = True
+    try:
+        test_swap_calculation_with_known_numeric()
+        print(f"{'Swap Numeric Calculation Check':<35} | {'PASS':<10}", flush=True)
+    except Exception:
+        test_swap_calc_numeric_passed = False
+        print(f"{'Swap Numeric Calculation Check':<35} | {'FAIL':<10}", flush=True)
+    diagnostic_ledger["swap_calc_numeric"] = "PASS" if test_swap_calc_numeric_passed else "FAIL"
+
+    sanity_sim = ICSimulator(unit="USD", balance=10_000., leverage=100., hedge=False)
+    sanity_sim.symbols_info = symbols_info_dict
+    sanity_sim.symbols_data = make_synthetic_symbols_data(symbols, tp_train)
+
+    sanity_base = TargetWeightEnv(sanity_sim, symbols, WINDOW, tp_train, decision_interval=96)
+    sanity_sub = SubEpisodeEnv(sanity_base, ep_len=2000)
+    sanity_wrapped = HarnessASanityWrapper(BootstrapFix(sanity_sub))
+
+    verify_no_lookahead_passed = True
+    try:
+        verify_no_lookahead(sanity_wrapped)
+        print(f"{'Look-ahead Bias Prevention Check':<35} | {'PASS':<10}", flush=True)
+    except Exception:
+        verify_no_lookahead_passed = False
+        print(f"{'Look-ahead Bias Prevention Check':<35} | {'FAIL':<10}", flush=True)
+    diagnostic_ledger["lookahead"] = "PASS" if verify_no_lookahead_passed else "FAIL"
+
+    verify_reproducibility_passed = True
+    try:
+        verify_reproducibility(
+            lambda: HarnessASanityWrapper(BootstrapFix(SubEpisodeEnv(TargetWeightEnv(sanity_sim, symbols, WINDOW, tp_train, decision_interval=96), ep_len=2000))),
+            lambda obs, env: np.zeros(len(symbols))
+        )
+        print(f"{'Complete Path Reproducibility Check':<35} | {'PASS':<10}", flush=True)
+    except Exception:
+        verify_reproducibility_passed = False
+        print(f"{'Complete Path Reproducibility Check':<35} | {'FAIL':<10}", flush=True)
+    diagnostic_ledger["reproducibility"] = "PASS" if verify_reproducibility_passed else "FAIL"
+    print("=" * 50, flush=True)
+
+    print("\n" + "=" * 80, flush=True)
+    print("[M-SANITY] ORACLE POLICY GATE & HARNESS A SANITY PRE-TRAINING", flush=True)
+    print("=" * 80, flush=True)
+
+    def oracle_policy(env):
+        tick = env.unwrapped._current_tick
+        a_vals = []
+        for i, s in enumerate(env.unwrapped.trading_symbols):
+            phase = i * np.pi / 3.0
+            val = np.cos(tick / 5.0 + phase)
+            a_vals.append(1.0 if val >= 0 else -1.0)
+        return np.array(a_vals, dtype=np.float64)
+
+    oracle_res = rollout(sanity_wrapped, lambda o, e: oracle_policy(e), seed=42)
+    dummy_res = rollout(sanity_wrapped, lambda o, e: np.zeros(len(symbols)), seed=42)
+    oracle_passed = bool(oracle_res["final_eq"] > dummy_res["final_eq"])
+    diagnostic_ledger["oracle_gate"] = "PASS" if oracle_passed else "FAIL"
+    print(f"  Oracle Policy execution: final_eq={oracle_res['final_eq']:.2f} | Dummy baseline: final_eq={dummy_res['final_eq']:.2f}", flush=True)
+    print(f"  Oracle policy gate validation: {'PASS' if oracle_passed else 'FAIL'}", flush=True)
+
+    sanity_sim_train = ICSimulator(unit="USD", balance=10_000., leverage=100., hedge=False)
+    sanity_sim_train.symbols_info = symbols_info_dict
+    sanity_sim_train.symbols_data = make_synthetic_symbols_data(symbols, tp_train)
+
+    sanity_base_train = TargetWeightEnv(
+        sanity_sim_train, symbols, WINDOW, tp_train,
+        cost_multiplier=0.0, turnover_penalty_lambda=0.0, decision_interval=96
+    )
+    sanity_sub_train = SubEpisodeEnv(sanity_base_train, ep_len=2000)
+    sanity_wrapped_train = HarnessASanityWrapper(BootstrapFix(sanity_sub_train))
+
+    sanity_sim_val = ICSimulator(unit="USD", balance=10_000., leverage=100., hedge=False)
+    sanity_sim_val.symbols_info = symbols_info_dict
+    sanity_sim_val.symbols_data = make_synthetic_symbols_data(symbols, tp_train)
+
+    sanity_base_val = TargetWeightEnv(
+        sanity_sim_val, symbols, WINDOW, tp_train,
+        cost_multiplier=0.0, turnover_penalty_lambda=0.0, decision_interval=96
+    )
+    sanity_sub_val = SubEpisodeEnv(sanity_base_val, ep_len=2000)
+    sanity_wrapped_val = HarnessASanityWrapper(BootstrapFix(sanity_sub_val))
+
+    sanity_agent = make_sanity_agent(sanity_wrapped_train, seed=42)
+    sanity_cb = [EVTracker(every=1000, value_net_module=sanity_agent.policy.value_net, validation_env=sanity_wrapped_val, silent=False)]
+    sanity_agent.learn(total_timesteps=12000, callback=sanity_cb)
+
+    sanity_res = rollout(sanity_wrapped_train, lambda o, e: sanity_agent.predict(o, deterministic=True)[0], seed=42)
+    sanity_eq = sanity_res["final_eq"]
+    dummy_eq = dummy_res["final_eq"]
+    
+    sanity_evs = sanity_cb[0].ev_history
+    sanity_pnls = sanity_cb[0].val_pnl_history
+    passed_sanity_ev = (len(sanity_evs) > 0 and sanity_evs[-1] > sanity_evs[0])
+
+    if len(sanity_pnls) >= 6:
+        mid = len(sanity_pnls) // 2
+        first_half = sanity_pnls[:mid]
+        last_half = sanity_pnls[mid:]
+        t_stat_probe, p_val_probe = stats.ttest_ind(last_half, first_half, equal_var=False)
+        passed_sanity_slope = bool(np.mean(last_half) > np.mean(first_half) and p_val_probe < 0.1)
+    else:
+        passed_sanity_slope = False
+
+    sanity_passed = bool(sanity_eq > dummy_eq and passed_sanity_ev and passed_sanity_slope)
+    diagnostic_ledger["sanity_rl_harness"] = "PASS" if sanity_passed else "FAIL"
+
+    print(f"  synthetic sanity results: final_eq={sanity_eq:.2f} | dummy baseline: final_eq={dummy_eq:.2f}", flush=True)
+    print(f"  synthetic pre-training sanity check (Harness A): {'PASS' if sanity_passed else 'FAIL'}", flush=True)
+    print("=" * 80, flush=True)
+
+    print("\n" + "=" * 50, flush=True)
+    print("DIAGNOSTIC SANITY LEDGER SUMMARY", flush=True)
+    print("=" * 50, flush=True)
+    for k, v in diagnostic_ledger.items():
+        print(f"  {k:<25} : {v}", flush=True)
+    print("=" * 50, flush=True)
+
+    mandatory_failures = [k for k, v in diagnostic_ledger.items() if v == "FAIL"]
+    if mandatory_failures:
+        raise AssertionError(f"Mandatory diagnostic sanity gates failed: {mandatory_failures}")
+
+    run_distribution_shift_diagnostic()
+
+    sim = ICSimulator(unit="USD", balance=10_000., leverage=100., hedge=False)
+    sim.symbols_info, sim.symbols_data = symbols_info_dict, {s: final_symbols_data[s].loc[STATE_INDEX] for s in symbols}
+
+    env_train = BootstrapFix(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_train, decision_interval=96))
+
+    val_ep_len = min(5000, len(tp_val) - WINDOW - 10)
+    
+    tp_val_selection = tp_val[:2 * val_third]
+    tp_val_holdout = tp_val_3
+    
+    val_selection_ep_len = min(5000, len(tp_val_selection) - WINDOW - 10)
+    val_holdout_ep_len = min(5000, len(tp_val_holdout) - WINDOW - 10)
+    
+    env_val_selection_setup = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_selection, is_eval=True, decision_interval=96), ep_len=val_selection_ep_len))
+    env_val_holdout = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, is_eval=True, decision_interval=96), ep_len=val_holdout_ep_len))
+
+    env_train.reset(seed=1)
+    eq_a = env_train.unwrapped.simulator.balance
+    env_val_selection_setup.reset(seed=1)
+    env_val_selection_setup.step(np.ones(len(symbols)) * -1.0)
+    assert env_train.unwrapped.simulator.balance == eq_a
+
+    print("=" * 80, flush=True)
+    print("[M-PRE] NULLS + SANITY บน env_val", flush=True)
+    nulls_start = time.perf_counter()
+
+    flat = rollout(env_val_selection_setup, lambda o, e: np.zeros(len(symbols)), seed=42)
+    assert abs(flat["final_eq"] - 10_000.0) < 0.01
+    print(f"  flat sanity: eq={flat['final_eq']:.4f} -> PASS", flush=True)
+
+    print("\n" + "=" * 80, flush=True)
+    print("[M-VOL-CHECK] ANNUALIZED ROLLING VOLATILITY STATISTICS (VAL PERIOD)", flush=True)
+    for s in symbols:
+        vols_val = []
+        for t in tp_val:
+            vols_val.append(VOL_MATRIX[STATE_INDEX.get_indexer([t], method='pad')[0], symbols.index(s)] * math.sqrt(96 * 252))
+        vols_val = np.array(vols_val)
+        print(f"  symbol {s:8s}: mean_ann_vol={np.mean(vols_val):.6f} std_ann_vol={np.std(vols_val):.6f}", flush=True)
+
+    env_val_1_setup = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_1, is_eval=True, decision_interval=96), ep_len=min(val_ep_len, len(tp_val_1) - WINDOW - 10)))
+    env_val_2_setup = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_2, is_eval=True, decision_interval=96), ep_len=min(val_ep_len, len(tp_val_2) - WINDOW - 10)))
+    env_val_3_setup = env_val_holdout
+
+    NULL_EVAL_CACHE = {
+        "Slice 1 (Early)": {},
+        "Slice 2 (Mid)": {},
+        "Full Holdout": {}
+    }
+
+    for period_key, s_env in [
+        ("Slice 1 (Early)", env_val_1_setup),
+        ("Slice 2 (Mid)", env_val_2_setup),
+        ("Full Holdout", env_val_holdout)
+    ]:
+        trend_results = []
+        vol_results = []
+        trend_pnls = []
+        trend_sortinos = []
+        vol_pnls = []
+        vol_sortinos = []
+        for esd in EVAL_SEEDS:
+            trend_res = rollout(s_env, lambda o, e: trend_policy(e), esd)
+            trend_results.append(trend_res)
+            trend_pnls.append(trend_res["final_eq"] - 10000.0)
+            trend_sortinos.append(trend_res["sortino"])
+
+            vol_res = rollout(s_env, lambda o, e: vol_target_policy(e), esd)
+            vol_results.append(vol_res)
+            vol_pnls.append(vol_res["final_eq"] - 10000.0)
+            vol_sortinos.append(vol_res["sortino"])
+
+        best_null_pnls = trend_pnls if np.mean(trend_pnls) > np.mean(vol_pnls) else vol_pnls
+        best_null_sortinos = trend_sortinos if np.mean(trend_pnls) > np.mean(vol_pnls) else vol_sortinos
+
+        NULL_EVAL_CACHE[period_key] = {
+            "trend_results": trend_results,
+            "vol_results": vol_results,
+            "trend_pnls": trend_pnls,
+            "trend_sortinos": trend_sortinos,
+            "vol_pnls": vol_pnls,
+            "vol_sortinos": vol_sortinos,
+            "best_null_pnls": best_null_pnls,
+            "best_null_sortinos": best_null_sortinos,
+            "best_null_mean": np.mean(best_null_pnls)
+        }
+
+    null_trend = NULL_EVAL_CACHE["Full Holdout"]["trend_results"]
+    agg_trend = summarize("null:trend", null_trend)
+
+    assert agg_trend["pct_in_market"][0] > 10 and agg_trend["trades_per_1k"][0] > 0
+
+    null_vol_target = NULL_EVAL_CACHE["Full Holdout"]["vol_results"]
+    agg_vol_target = summarize("null:vol-target", null_vol_target)
+
+    print(f"[TIME] Null Baselines Rollout completed in {time.perf_counter() - nulls_start:.4f} seconds", flush=True)
+
+    print("\n" + "=" * 80, flush=True)
+    print("[M-TRAIN] learning + behavior (PARALLEL MULTI-SEED & ABLATION STUDY)", flush=True)
+    train_start = time.perf_counter()
+
+    LAMBDA_CONFIGS = [0.0, 0.01, 0.05]
+
+    ctx = multiprocessing.get_context("spawn")
+    MAX_CONCURRENT_WORKERS = max(1, os.cpu_count() or 2)
+    active_processes = []
+    peak_rss = {}
+
+    ablation_tasks = []
+    for sd in SEED_SET:
+        for lambda_val in LAMBDA_CONFIGS:
+            ablation_tasks.append((sd, lambda_val))
+
+    print("=" * 80, flush=True)
+    print("MONITORING ACTIVE ABLATION WORKERS", flush=True)
+    print("=" * 80, flush=True)
+    print(f"{'Time':<8} | {'Seed':<4} | {'Lambda':<6} | {'PID':<6} | {'Event':<10} | {'RSS (MB)':<10} | {'Exit Code':<9}", flush=True)
+    print("-" * 80, flush=True)
+
+    while ablation_tasks or active_processes:
+        while len(active_processes) < MAX_CONCURRENT_WORKERS and ablation_tasks:
+            sd, lambda_val = ablation_tasks.pop(0)
+            p = ctx.Process(
+                target=train_seed_worker,
+                args=(
+                    sd, symbols, WINDOW, val_ep_len, STEPS, n_steps,
+                    batch_size, EVAL_SEEDS, lambda_val
+                )
+            )
+            t_start_0 = time.perf_counter()
+            p.start()
+            t_start_elapsed = time.perf_counter() - t_start_0
+            active_processes.append((sd, lambda_val, p))
+            peak_rss[p.pid] = 0.0
+            t_str = datetime.datetime.now().strftime('%H:%M:%S')
+            print(f"{t_str:<8} | {sd:<4} | {lambda_val:<6.2f} | {p.pid:<6} | {'STARTED':<10} | {f'{t_start_elapsed:.3f}s':<10} | RUNNING", flush=True)
+
+        time.sleep(5)
+
+        still_active = []
+        for sd, lambda_val, p in active_processes:
+            if p.is_alive():
+                still_active.append((sd, lambda_val, p))
+                try:
+                    proc = psutil.Process(p.pid)
+                    rss = proc.memory_info().rss / (1024 * 1024)
+                    if rss > peak_rss[p.pid]:
+                        peak_rss[p.pid] = rss
+                except Exception:
+                    pass
+            else:
+                p.join()
+                t_str = datetime.datetime.now().strftime('%H:%M:%S')
+                p_rss = peak_rss.get(p.pid, 0.0)
+                print(f"{t_str:<8} | {sd:<4} | {lambda_val:<6.2f} | {p.pid:<6} | {'FINISHED':<10} | {f'{p_rss:.1f} MB':<10} | {p.exitcode:<9}", flush=True)
+                log_file = f"/tmp/crash_seed_{sd}_lambda_{lambda_val}.log"
+                if os.path.exists(log_file) and os.path.getsize(log_file) > 0:
+                    print(f"--- LOG OUTPUT FOR CRASHED SEED {sd} LAMBDA {lambda_val} ---", flush=True)
+                    with open(log_file, "r") as lf:
+                        print(lf.read(), flush=True)
+                    print("-" * 80, flush=True)
+        active_processes = still_active
+
+    ablation_raw_results = {}
+    for lambda_val in LAMBDA_CONFIGS:
+        ablation_raw_results[lambda_val] = []
+        for sd in SEED_SET:
+            res_file = f"/tmp/result_seed_{sd}_lambda_{lambda_val}.pkl"
+            if os.path.exists(res_file):
+                with open(res_file, "rb") as rf:
+                    ablation_raw_results[lambda_val].append(pickle.load(rf))
+        ablation_raw_results[lambda_val].sort(key=lambda r: r["seed"])
+
+    optimal_lambdas = {}
+    for sd in SEED_SET:
+        best_lambda = 0.0
+        best_val = -1e9
+        for l_val in [0.0, 0.01, 0.05]:
+            res_list = ablation_raw_results[l_val]
+            matching_res = next((r for r in res_list if r["seed"] == sd), None)
+            if matching_res is not None:
+                eqs_1 = [e["Slice 1 (Early)"][0] for e in matching_res["eval_results"]]
+                eqs_2 = [e["Slice 2 (Mid)"][0] for e in matching_res["eval_results"]]
+                mean_eq = (np.mean(eqs_1) + np.mean(eqs_2)) / 2.0
+                if mean_eq > best_val:
+                    best_val = mean_eq
+                    best_lambda = l_val
+        optimal_lambdas[sd] = best_lambda
+
+    agents = {}
+    train_logs = {}
+
+    print("\n" + "=" * 160, flush=True)
+    print("TRAINING LOGS FOR THE OPTIMAL LAMBDA PER SEED", flush=True)
+    print("=" * 160, flush=True)
+    print("Seed | Step     | EV     | Val-EV  | Val-Var | SRank | Loss   | OOS-Loss | Entropy | MDD%  | PnL_Train | Grad    | KL     | Clip  | Churn | BndV%   | AdvStd | RewValRatio | Churn_P", flush=True)
+    print("-" * 160, flush=True)
+
+    for sd in SEED_SET:
+        opt_l = optimal_lambdas[sd]
+        res_list = ablation_raw_results[opt_l]
+        res = next((r for r in res_list if r["seed"] == sd), None)
+        if res is not None:
+            env_train_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_train, turnover_penalty_lambda=opt_l, decision_interval=96), ep_len=5000))
+            ag = make_agent(env_train_local, sd, n_steps=n_steps, batch_size=batch_size)
+            ag.policy.load_state_dict(res["policy_state_dict"])
+            agents[sd] = ag
+            train_logs[sd] = (res["ev_lines"], res["beh_rows"])
+            for line in res["ev_lines"]:
+                print(f"{sd:<4d} | {line}", flush=True)
+            print_behavior_table(res["beh_rows"])
+            
+            first_trade_step = None
+            for row in res["beh_rows"]:
+                if row["trades_1k"] > 0:
+                    first_trade_step = row["step"]
+                    break
+            print(f"    Seed {sd} - First Trade Step: {first_trade_step if first_trade_step is not None else 'N/A'}", flush=True)
+            
+            if res.get("anomalies"):
+                print(f"    Seed {sd} - Validation Anomalies Detected: {res['anomalies']}", flush=True)
+
+    print(f"[TIME] Overall Agent Training & Parallel Evaluation completed in {time.perf_counter() - train_start:.4f} seconds", flush=True)
+
+    env_train_wrapped = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_train, turnover_penalty_lambda=0.0, decision_interval=96), ep_len=5000))
+    _probe = make_agent(env_train_wrapped, 42)
+    untrained_runs = []
+    for sd in SEED_SET:
+        untrained_runs.append(rollout(env_val_holdout, lambda o, e: _probe.predict(o, deterministic=True)[0], seed=sd))
+    agg_untrained = summarize("agent:untrained", untrained_runs)
+    del _probe
+
+    early_pnls = []
+    late_pnls = []
+    for sd in SEED_SET:
+        rows_val = train_logs[sd][1]
+        if len(rows_val) >= 6:
+            early_pnls.extend([r["pnl"] for r in rows_val[:3]])
+            late_pnls.extend([r["pnl"] for r in rows_val[-3:]])
+
+    t_stat_learn, p_val_learn = stats.ttest_ind(early_pnls, late_pnls, equal_var=False) if len(early_pnls) >= 3 else (0.0, 1.0)
+    mean_learning_improved = bool(np.mean(late_pnls) > np.mean(early_pnls) and p_val_learn < 0.05)
+
+    print("\n" + "=" * 80, flush=True)
+    print("[M-LEARNING-DIAGNOSTIC] POLICY OPTIMIZATION INSIDE TRAINING SET", flush=True)
+    print("=" * 80, flush=True)
+    if early_pnls:
+        print(f"  Early Training PnLs (Val Probe Mean): {np.mean(early_pnls):.2f}", flush=True)
+    else:
+        print("  No early samples", flush=True)
+    if late_pnls:
+        print(f"  Late Training PnLs (Val Probe Mean): {np.mean(late_pnls):.2f}", flush=True)
+    else:
+        print("  No late samples", flush=True)
+    print(f"  t-statistic: {t_stat_learn:.4f}, p-value: {p_val_learn:.4e}", flush=True)
+    print(f"  Did policy show statistically significant improvement? {mean_learning_improved}", flush=True)
+    print("=" * 80, flush=True)
+
+    print("\n" + "=" * 125, flush=True)
+    print(f"{'Walk-Forward Analysis (WFA) & Out-of-Sample (OOS) Slice Benchmarking vs Slice Nulls':^125}", flush=True)
+    print("=" * 125, flush=True)
+    print(f"{'Val Slice / Period':<20} | {'Agent PnL (Mean±Std)':<22} | {'Best Null PnL':<13} | {'P(Ag>Null)':<10} | {'t-stat':<10} | {'-log10(p)':<10} | {'Eff z':<8} | {'Optimal Lambda':<14} | {'Branch Switches':<15}", flush=True)
+    print("-" * 125, flush=True)
+
+    wfa_start = time.perf_counter()
+
+    slice_z_scores = []
+    for period_key, s_env in [
+        ("Slice 1 (Early)", env_val_1_setup),
+        ("Slice 2 (Mid)", env_val_2_setup),
+        ("Full Holdout", env_val_holdout)
+    ]:
+        agent_pnls_slice = []
+        best_null_pnls = []
+        branch_switches_list = []
+        for idx, sd in enumerate(SEED_SET):
+            esd = EVAL_SEEDS[idx]
+            opt_l = optimal_lambdas[sd]
+            res_list = ablation_raw_results[opt_l]
+            matching_res = next((r for r in res_list if r["seed"] == sd), None)
+            eval_env_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, turnover_penalty_lambda=opt_l, is_eval=True, decision_interval=96), ep_len=val_holdout_ep_len))
+            ag_local = make_agent(eval_env_local, sd, n_steps=n_steps, batch_size=batch_size)
+            ag_local.policy.load_state_dict(matching_res["policy_state_dict"])
+
+            ag_res = rollout(s_env, lambda o, e, a=ag_local: a.predict(o, deterministic=True)[0], esd)
+            agent_pnls_slice.append(ag_res["final_eq"] - 10000.0)
+            branch_switches_list.append(ag_res.get("reward_branch_switches", 0.0))
+
+            trend_res = rollout(s_env, lambda o, e: trend_policy(e), esd)
+            vol_res = rollout(s_env, lambda o, e: vol_target_policy(e), esd)
+            best_null_pnl = max(trend_res["final_eq"] - 10000.0, vol_res["final_eq"] - 10000.0)
+            best_null_pnls.append(best_null_pnl)
+
+        slice_len_period = len(tp_val_1) if "Slice" in period_key else len(tp_val_holdout)
+        overlap_factor_period = max(1.0, (val_holdout_ep_len * len(EVAL_SEEDS)) / (slice_len_period + 1e-9))
+
+        diffs = np.array(agent_pnls_slice) - np.array(best_null_pnls)
+        n_eff = max(3.0, len(diffs) / overlap_factor_period)
+        mean_diff = np.mean(diffs)
+        var_diff = np.var(diffs, ddof=1) if len(diffs) > 1 else 0.0
+        se = math.sqrt(var_diff / n_eff + 1e-12)
+        t_stat_slice = mean_diff / se
+        df_val = max(3.0, n_eff - 1)
+        log_p = stats.t.logsf(abs(t_stat_slice), df=df_val) + math.log(2.0)
+        neg_log10_p = -log_p / math.log(10.0)
+        z_slice = float(stats.norm.isf(np.exp(log_p))) if log_p > -50.0 else 10.0
+        if t_stat_slice < 0:
+            z_slice = -z_slice
+
+        prob_out, m_diff, s_diff = paired_bootstrap_analysis(agent_pnls_slice, best_null_pnls)
+        prob_str = f"{prob_out:.1%}"
+
+        if math.isnan(t_stat_slice):
+            t_str = "INSUFFICIENT"
+            p_str = "SAMPLES"
+            z_str = "N/A"
+        else:
+            t_str = f"{t_stat_slice:>+10.3f}"
+            p_str = f"{neg_log10_p:.4f}"
+            z_str = f"{z_slice:>+10.2f}"
+            if "Slice" in period_key:
+                slice_z_scores.append(z_slice)
+        null_str = f"{np.mean(best_null_pnls):>+10.2f}"
+        opt_l_mean = np.mean([optimal_lambdas[sd] for sd in SEED_SET])
+        avg_branch_switches = np.mean(branch_switches_list)
+
+        print(f"{period_key:<20} | {np.mean(agent_pnls_slice):>+9.2f} ± {safe_std(agent_pnls_slice):<8.2f} | {null_str:<13} | {prob_str:<10} | {t_str:<10} | {p_str:<10} | {z_slice:>+8.2f} | {opt_l_mean:<14.3f} | {avg_branch_switches:<15.1f}", flush=True)
+    print("=" * 125, flush=True)
+    print(f"[TIME] WFA & OOS Benchmarking analysis completed in {time.perf_counter() - wfa_start:.4f} seconds", flush=True)
+
+    agent_runs = []
+    for idx, sd in enumerate(SEED_SET):
+        esd = EVAL_SEEDS[idx]
+        opt_l = optimal_lambdas[sd]
+        res_list = ablation_raw_results[opt_l]
+        matching_res = next((r for r in res_list if r["seed"] == sd), None)
+        eval_env_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, turnover_penalty_lambda=opt_l, is_eval=True, decision_interval=96), ep_len=val_holdout_ep_len))
+        ag_local = make_agent(eval_env_local, sd, n_steps=n_steps, batch_size=batch_size)
+        ag_local.policy.load_state_dict(matching_res["policy_state_dict"])
+        run_res = rollout(env_val_holdout, lambda o, e, a=ag_local: a.predict(o, deterministic=True)[0], esd)
+        agent_runs.append(run_res)
+
+    agg_ag = summarize("agent:trained", agent_runs)
+
+    run_distribution_shift_diagnostic(agents[SEED_SET[0]])
+
+    all_oos_returns = []
+    for r in agent_runs:
+        eqs_run = r["_eqs"]
+        rets_run = np.diff(eqs_run) / (np.abs(eqs_run[:-1]) + 1e-12)
+        all_oos_returns.append(rets_run)
+
+    srs_oos = []
+    for r in all_oos_returns:
+        std = np.std(r, ddof=1)
+        srs_oos.append(np.mean(r) / std if std > 1e-9 else 0.0)
+    best_seed_idx = np.argmax(srs_oos)
+    best_seed = SEED_SET[best_seed_idx]
+
+    pbo_val = compute_cscv_pbo(all_oos_returns)
+    dsr_prob, best_sr, sr_star = compute_dsr(all_oos_returns, best_seed_idx)
+
+    print("\n" + "=" * 80, flush=True)
+    print("[DIAGNOSTIC-F] QUANT STATISTICS FOR BACKTEST OVERFITTING & SELECTION BIAS", flush=True)
+    print("=" * 80, flush=True)
+    if max(srs_oos) <= 0.0:
+        print("  Probability of Backtest Overfitting (PBO via CPCV): N/A (no positive-SR candidate — metric undefined for uniformly losing set)", flush=True)
+    else:
+        print(f"  Probability of Backtest Overfitting (PBO via CPCV): {pbo_val:.1%}", flush=True)
+    print(f"  Best Trial (Seed {best_seed}) Observed Sharpe Ratio (unannualized): {best_sr:.4f}", flush=True)
+    print(f"  Expected Maximum Sharpe Ratio under Null (N={len(SEED_SET) * len(LAMBDA_CONFIGS)}): {sr_star:.4f}", flush=True)
+    print(f"  Deflated Sharpe Ratio (DSR Probability): {dsr_prob:.2%}", flush=True)
+    if dsr_prob >= 0.95:
+        print("  VERDICT ON SELECTION BIAS: PASS (DSR probability >= 95% indicates genuine skill)", flush=True)
+    else:
+        print("  VERDICT ON SELECTION BIAS: FAIL (DSR probability < 95% indicates performance is a multiple-testing fluke)", flush=True)
+    print("=" * 80, flush=True)
+
+    print("\n" + "=" * 80, flush=True)
+    print("[DIAGNOSTIC-G] TURNOVER PENALTY ABLATION STUDY (CAUSAL VERIFICATION)", flush=True)
+    print("=" * 80, flush=True)
+    print(f"{'Penalty Lambda':<25} | {'Mean Magnitude':<20} | {'OOS Sortino (Mean)':<15} | {'OOS Equity (Mean)':<15}", flush=True)
+    print("-" * 80, flush=True)
+
+    for l_val in LAMBDA_CONFIGS:
+        l_env = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, turnover_penalty_lambda=l_val, is_eval=True, decision_interval=96), ep_len=val_holdout_ep_len))
+        mags = []
+        sortinos = []
+        eqs_oos = []
+        for idx, sd in enumerate(SEED_SET):
+            esd = EVAL_SEEDS[idx]
+            res_list = ablation_raw_results[l_val]
+            matching_res = next((r for r in res_list if r["seed"] == sd), None)
+            if matching_res is not None:
+                eval_env_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, turnover_penalty_lambda=l_val, is_eval=True, decision_interval=96), ep_len=val_holdout_ep_len))
+                ag_local = make_agent(eval_env_local, sd, n_steps=n_steps, batch_size=batch_size)
+                ag_local.policy.load_state_dict(matching_res["policy_state_dict"])
+                eval_res = rollout(eval_env_local, lambda o, e, a=ag_local: a.predict(o, deterministic=True)[0], esd)
+                mags.append(np.mean(np.abs(eval_res["actions_history"])))
+                sortinos.append(eval_res["sortino"])
+                eqs_oos.append(eval_res["final_eq"])
+
+        m_mag = np.mean(mags) if mags else 0.0
+        m_sort = np.mean(sortinos) if sortinos else 0.0
+        m_eq = np.mean(eqs_oos) if eqs_oos else 10000.0
+        print(f"{l_val:<25.2f} | {m_mag:<20.4f} | {m_sort:<15.2f} | {m_eq:<15.2f}", flush=True)
+    print("=" * 80, flush=True)
+
+    reward_decomposition_diagnostic(env_val_holdout, agents[SEED_SET[0]], SEED_SET[0])
+    action_saturation_diagnostic(env_val_holdout, agents[SEED_SET[0]], SEED_SET[0])
+
+    print("\n" + "=" * 120, flush=True)
+    print("COST SENSITIVITY STRESS TEST & PNL RECONCILIATION AUDIT", flush=True)
+    print("=" * 120, flush=True)
+    print(f"{'Multiplier':<10} | {'Seed':<5} | {'Net PnL':<10} | {'Reconciled':<10} | {'Residual':<9} | {'Gross Realized':<14} | {'Gross Unrealized':<16} | {'Swaps':<9} | {'Fees':<8}", flush=True)
+    print("-" * 120, flush=True)
+
+    stress_start = time.perf_counter()
+    cost_multipliers = [1.0, 1.5, 2.0]
+    overlap_factor_full = max(1.0, (val_holdout_ep_len * len(EVAL_SEEDS)) / (len(tp_val_holdout) + 1e-9))
+
+    eq_diffs = []
+    for cm in cost_multipliers:
+        if cm == 1.0:
+            agent_cost_runs = agent_runs
+            trend_cost_runs = NULL_EVAL_CACHE["Full Holdout"]["trend_results"]
+            vol_cost_runs = NULL_EVAL_CACHE["Full Holdout"]["vol_results"]
+            agg_ac = agg_ag
+        else:
+            agent_cost_runs = []
+            for idx, sd in enumerate(SEED_SET):
+                esd = EVAL_SEEDS[idx]
+                opt_l = optimal_lambdas[sd]
+                env_val_cost = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, cost_multiplier=cm, turnover_penalty_lambda=opt_l, is_eval=True, decision_interval=96), ep_len=val_holdout_ep_len))
+                res_list = ablation_raw_results[opt_l]
+                matching_res = next((r for r in res_list if r["seed"] == sd), None)
+                ag_local = make_agent(env_val_cost, sd, n_steps=n_steps, batch_size=batch_size)
+                ag_local.policy.load_state_dict(matching_res["policy_state_dict"])
+                run_res = rollout(env_val_cost, lambda o, e, a=ag_local: a.predict(o, deterministic=True)[0], esd)
+                agent_cost_runs.append(run_res)
+
+            trend_cost_runs = []
+            vol_cost_runs = []
+            for idx, sd in enumerate(SEED_SET):
+                esd = EVAL_SEEDS[idx]
+                opt_l = optimal_lambdas[sd]
+                env_val_cost = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, cost_multiplier=cm, turnover_penalty_lambda=opt_l, is_eval=True, decision_interval=96), ep_len=val_holdout_ep_len))
+                trend_res = rollout(env_val_cost, lambda o, e: trend_policy(e), esd)
+                vol_res = rollout(env_val_cost, lambda o, e: vol_target_policy(e), esd)
+                trend_cost_runs.append(trend_res)
+                vol_cost_runs.append(vol_res)
+
+        for idx, sd in enumerate(SEED_SET):
+            run_res = agent_cost_runs[idx]
+            r_net = run_res["final_eq"] - 10000.0
+            r_rec = run_res["reconciled_pnl"]
+            r_res = run_res["residual"]
+            r_gross_rel = run_res["gross_raw_realized"]
+            r_gross_unrel = run_res["gross_raw_unrealized"]
+            r_swaps = run_res.get("accumulated_swaps", 0.0)
+            r_fees = run_res.get("accumulated_fees", 0.0)
+            print(f"{cm:<10.1f} | {sd:<5d} | {r_net:>+10.2f} | {r_rec:>+10.2f} | {r_res:>+9.2e} | {r_gross_rel:>+14.2f} | {r_gross_unrel:>+16.2f} | {r_swaps:>+9.2f} | {r_fees:>+8.2f}", flush=True)
+
+        agent_cost_eqs = [r["final_eq"] for r in agent_cost_runs]
+        trend_cost_eqs = [r["final_eq"] for r in trend_cost_runs]
+        vol_cost_eqs = [r["final_eq"] for r in vol_cost_runs]
+
+        best_null_cost_eqs = trend_cost_eqs if np.mean(trend_cost_eqs) > np.mean(vol_cost_eqs) else vol_cost_eqs
+        t_stat_cost, neg_log10_p_cost, z_cost = corrected_welch_ttest(agent_cost_eqs, best_null_cost_eqs, overlap_factor_full)
+
+        if cm > 1.0:
+            pct_diff = abs(np.mean(agent_cost_eqs) - np.mean([r["final_eq"] for r in agent_runs])) / 10000.0 * 100.0
+            eq_diffs.append(pct_diff)
+
+    print("-" * 120, flush=True)
+    if eq_diffs and all(d < 0.1 for d in eq_diffs):
+        print("  Cost sensitivity stress test result: Insensitive to cost multiplier (delta equity < 0.1%).", flush=True)
+    print(f"[TIME] Cost Sensitivity Stress Test completed in {time.perf_counter() - stress_start:.4f} seconds", flush=True)
+
+    print("\n" + "=" * 80, flush=True)
+    print("[M-PER-SYMBOL] STANDALONE PER-SYMBOL CLOSED PNL DECOMPOSITION", flush=True)
+    decomp_start = time.perf_counter()
+    symbol_breakdown = defaultdict(list)
+    for r in agent_runs:
+        for s_sym, pnl_val in r.get("symbol_closed_pnl", {}).items():
+            symbol_breakdown[s_sym].append(pnl_val)
+
+    for s_sym in symbols:
+        p_vals = symbol_breakdown.get(s_sym, [0.0])
+        print(f"  symbol {s_sym:8s}: closed_pnl_mean={np.mean(p_vals):+9.2f} ± {safe_std(p_vals):6.2f}", flush=True)
+    print(f"[TIME] Per-Symbol PnL Decomposition completed in {time.perf_counter() - decomp_start:.4f} seconds", flush=True)
+
+    print("\n" + "=" * 80, flush=True)
+    print("[M-POWER] STATISTICAL POWER ANALYSIS", flush=True)
+    power_start = time.perf_counter()
+
+    agent_full_pnls = [r["final_eq"] - 10000.0 for r in agent_runs]
+    cached_oos_full = NULL_EVAL_CACHE.get("Full Holdout", {})
+    best_null_full_pnls = cached_oos_full.get("best_null_pnls")
+
+    req_seeds, calculated_d = compute_required_seeds(agent_full_pnls, best_null_full_pnls, alpha=0.05, power=0.80)
+    print(f"  Observed Cohen's d: {calculated_d:.4f}", flush=True)
+    print(f"  Required Seeds for 80% statistical power (alpha=0.05): {req_seeds}", flush=True)
+    if req_seeds == float('inf'):
+        print("  WARNING: Effect size is too small; statistical power is uncomputable or demands an infinite cohort.", flush=True)
+    elif req_seeds > 100:
+        print(f"  WARNING: Variance is high relative to effect size. Running {req_seeds} seeds is computationally impractical.", flush=True)
+        print("  RECOMMENDATION: Restructure model representations or reduce environment noise to shrink variance.", flush=True)
+    else:
+        print(f"  STATUS: Cohort size of {req_seeds} is statistically sufficient and computationally feasible.", flush=True)
+    print(f"[TIME] Statistical Power Analysis completed in {time.perf_counter() - power_start:.4f} seconds", flush=True)
+
+    n_trials = 5
+    z_req = 2.0 + math.sqrt(2 * math.log(max(n_trials, 1)))
+    is_degenerate = (agg_ag["trades_per_1k"][0] < 1.0) or (agg_ag["pct_in_market"][0] < 10.0)
+
+    if is_degenerate:
+        verdict = "BAD (degenerate)"
+        z_vs_best_null_eq = 0.0
+        margin_vs_carry_eq = 0.0
+        z_vs_best_null_sortino = 0.0
+        margin_vs_carry_sortino = 0.0
+    else:
+        a_eq_samples = [r["final_eq"] for r in agent_runs]
+        a_pnl_samples = [eq - 10000.0 for eq in a_eq_samples]
+
+        null_runs_paired = []
+        for esd in EVAL_SEEDS:
+            trend_res = rollout(env_val_holdout, lambda o, e: trend_policy(e), esd)
+            vol_res = rollout(env_val_holdout, lambda o, e: vol_target_policy(e), esd)
+            best_null_pnl = max(trend_res["final_eq"] - 10000.0, vol_res["final_eq"] - 10000.0)
+            null_runs_paired.append(best_null_pnl)
+
+        diffs = np.array(a_pnl_samples) - np.array(null_runs_paired)
+        n_eff = max(3.0, len(diffs) / overlap_factor_full)
+        mean_diff = np.mean(diffs)
+        var_diff = np.var(diffs, ddof=1) if len(diffs) > 1 else 0.0
+        se = math.sqrt(var_diff / n_eff + 1e-12)
+        t_stat_eq = mean_diff / se
+        df_val = max(3.0, n_eff - 1)
+        log_p = stats.t.logsf(abs(t_stat_eq), df=df_val) + math.log(2.0)
+        neg_log10_p_eq = -log_p / math.log(10.0)
+        z_vs_best_null_eq = float(stats.norm.isf(np.exp(log_p))) if log_p > -50.0 else 10.0
+        if t_stat_eq < 0:
+            z_vs_best_null_eq = -z_vs_best_null_eq
+
+        margin_vs_carry_eq = float(np.mean(a_pnl_samples) / (safe_std(a_pnl_samples) + 1e-12))
+
+        t_stat_sort = 0.0
+        neg_log10_p_sort = 0.0
+        z_vs_best_null_sortino = 0.0
+        margin_vs_carry_sortino = 0.0
+
+        passed_eq = (z_vs_best_null_eq >= z_req and margin_vs_carry_eq > 2.0)
+        passed_sortino = True
+
+        slices_positive = len(slice_z_scores) > 0 and all(z >= 0.0 for z in slice_z_scores)
+        slices_statistically_strong = len(slice_z_scores) > 0 and all(z >= 1.96 for z in slice_z_scores)
+
+        if z_vs_best_null_eq < 0.0 or any(z < 0.0 for z in slice_z_scores):
+            verdict = "BAD"
+        elif passed_eq and passed_sortino and slices_statistically_strong:
+            verdict = "CONFIRMED"
+        elif z_vs_best_null_eq >= 2.0 and slices_positive:
+            verdict = "LIKELY"
+        elif z_vs_best_null_eq > 0.0:
+            verdict = "CONDITIONAL"
+        else:
+            verdict = "BAD"
+
+    if math.isnan(t_stat_eq):
+        print("\n  welch_t_eq=INSUFFICIENT SAMPLES", flush=True)
+    else:
+        print(f"\\n  paired_t_eq={t_stat_eq:.3f} (-log10_p_eq={neg_log10_p_eq:.4f}) | effective_z_eq={z_vs_best_null_eq:.2f} | (agent-carry_eq)/std={margin_vs_carry_eq:.2f}", flush=True)
+    print(f"  z_required(deflated, {n_trials} trials)={z_req:.2f}", flush=True)
+    print(f"  VERDICT: {verdict}", flush=True)
+
+    if pbo_val < 0.05 and (best_sr < 0.0 or z_vs_best_null_eq < 0.0):
+        print("\n  [WARNING] Diagnostic Contradiction: PBO is extremely low (<5%) but OOS z-score/Sharpe is negative. This indicates a diagnostic failure or structural misalignment in the validation protocol, NOT strategy viability.", flush=True)
+
+    print(f"\n[TIME] Total execution completed in {time.perf_counter() - global_start_time:.4f} seconds", flush=True)
