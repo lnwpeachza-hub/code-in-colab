@@ -70,6 +70,21 @@ if "STRICT_ADMISSIBLE" in globals():
         if len(filtered) > 0:
             symbols = filtered
 
+def print_table(headers, rows):
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, val in enumerate(row):
+            widths[i] = max(widths[i], len(str(val)))
+    sep = "+" + "+".join(["-" * (w + 2) for w in widths]) + "+"
+    header_str = "|" + "|".join([f" {headers[i]:<{widths[i]}} " for i in range(len(headers))]) + "|"
+    print(sep)
+    print(header_str)
+    print(sep)
+    for row in rows:
+        row_str = "|" + "|".join([f" {str(row[i]):<{widths[i]}} " for i in range(len(row))]) + "|"
+        print(row_str)
+    print(sep)
+
 def get_ic_markets_cost(symbol, df, info_dict):
     price = float(df["Close"].mean())
     si = info_dict.get(symbol)
@@ -203,8 +218,8 @@ if DEV_MODE:
     batch_size = 64
 else:
     STEPS = 30000
-    SEED_SET = [42, 43, 44, 45, 46]
-    EVAL_SEEDS = [101, 102, 103, 104, 105]
+    SEED_SET = [42, 43, 44, 45, 46, 47, 48, 49]
+    EVAL_SEEDS = [101, 102, 103, 104, 105, 106, 107, 108]
     n_steps = 1024
     batch_size = 128
 
@@ -310,6 +325,21 @@ core_f_mean = np.mean(train_slice_core, axis=0, keepdims=True)
 core_f_std = np.std(train_slice_core, axis=0, keepdims=True)
 core_f_std[core_f_std < 1e-8] = 1.0
 STATE_MATRIX = (STATE_MATRIX - core_f_mean) / core_f_std
+
+def print_table(headers, rows):
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, val in enumerate(row):
+            widths[i] = max(widths[i], len(str(val)))
+    sep = "+" + "+".join(["-" * (w + 2) for w in widths]) + "+"
+    header_str = "|" + "|".join([f" {headers[i]:<{widths[i]}} " for i in range(len(headers))]) + "|"
+    print(sep)
+    print(header_str)
+    print(sep)
+    for row in rows:
+        row_str = "|" + "|".join([f" {str(row[i]):<{widths[i]}} " for i in range(len(row))]) + "|"
+        print(row_str)
+    print(sep)
 
 class EmaVarianceTracker:
     def __init__(self, alpha=0.01, initial_var=1.0, floor=1e-3):
@@ -515,6 +545,37 @@ def compute_rollout_srank(model):
     latent_vf_np = latent_vf.cpu().numpy()
     return compute_srank(latent_vf_np)
 
+def compute_dual_zero_dormant(policy, obs_batch):
+    policy.eval()
+    dormant_ratio = 0.0
+    try:
+        obs_tensor = {}
+        for k, v in obs_batch.items():
+            obs_tensor[k] = to_float_tensor(v, policy.device)
+        features = policy.features_extractor(obs_tensor)
+        x = features
+        total_neurons = 0
+        dormant_neurons = 0
+        for layer in policy.mlp_extractor.policy_net:
+            if isinstance(layer, nn.Linear):
+                x = layer(x)
+                x.retain_grad()
+                act_abs = torch.abs(x).mean(dim=0)
+                dummy_loss = x.sum()
+                dummy_loss.backward(retain_graph=True)
+                grad_abs = torch.abs(x.grad).mean(dim=0) if x.grad is not None else torch.zeros_like(act_abs)
+                is_dormant = (act_abs < 0.01) & (grad_abs < 1e-6)
+                dormant_neurons += is_dormant.sum().item()
+                total_neurons += x.shape[1]
+            elif isinstance(layer, (nn.Tanh, nn.ReLU, nn.GELU)):
+                x = layer(x)
+        if total_neurons > 0:
+            dormant_ratio = dormant_neurons / total_neurons
+    except Exception:
+        pass
+    policy.train()
+    return dormant_ratio
+
 def compute_pcgrad_cosine(model, obs, actions, raw_rewards, penalties):
     policy = model.policy
     policy.zero_grad()
@@ -660,15 +721,15 @@ class ICSimulator(MtSimulator):
 
 class ICEnv(MtEnv):
     def __init__(self, sim, trading_symbols, window_size, time_points,
-                 dsr_eta=0.004, target_ann_vol=0.10, rebalance_band=0.10, cost_multiplier=1.0, 
-                 decision_interval=96, **kw):
+                 dsr_eta=0.004, target_ann_vol=0.10, rebalance_band=0.10, cost_multiplier=1.0,
+                 decision_interval=16, **kw):
         self._dsr_eta, self._tgtvol, self._band = dsr_eta, target_ann_vol, rebalance_band
         self._cost_mult = cost_multiplier
         self.decision_interval = decision_interval
         super().__init__(original_simulator=sim, trading_symbols=trading_symbols,
                          window_size=window_size, time_points=time_points,
                          fee=lambda s: REAL_COST[s] * self._cost_mult, **kw)
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(len(trading_symbols),), dtype=np.float64)
+        self.action_space = spaces.Box(low=0.0, high=1.0, shape=(len(trading_symbols),), dtype=np.float64)
         self.peak_eq = 0.0
         self._barvol = {s: float(np.nanstd(np.log(final_symbols_data[s]["Close"].loc[:STATE_INDEX[i_tr]]).diff())) for s in trading_symbols}
         self.symbol_to_idx = {s: i for i, s in enumerate(trading_symbols)}
@@ -730,16 +791,40 @@ class ICEnv(MtEnv):
         self.history.append(info)
         return obs, step_reward, terminate, self._truncated, info
 
-    def get_trend_sign(self, symbol):
+    def get_directional_signal(self, symbol):
         tick = self._current_tick
         current_time = self.time_points[tick]
         df = self.unwrapped.simulator.symbols_data[symbol]
         nearest_idx = df.index.get_indexer([current_time], method='pad')[0]
-        if nearest_idx >= 96:
+        lookback = 2688 if symbol == "BTCUSD" else 11520
+        if nearest_idx >= lookback:
             price_now = float(df.iloc[nearest_idx]["Close"])
-            price_past = float(df.iloc[nearest_idx - 96]["Close"])
-            return 1.0 if price_now >= price_past else -1.0
-        return 0.0
+            price_past = float(df.iloc[nearest_idx - lookback]["Close"])
+            trend_sign = 1.0 if price_now >= price_past else -1.0
+        else:
+            return 0.0
+
+        if symbol == "USDJPY":
+            carry_sign = 1.0
+            if "USDJPY_carry_signal" in list(STATE_COLUMNS):
+                col_idx = list(STATE_COLUMNS).index("USDJPY_carry_signal")
+                tp_idx = self._pos_mapping[self._current_tick]
+                c_val = float(STATE_MATRIX[tp_idx, col_idx])
+                carry_sign = 1.0 if c_val >= 0.0 else -1.0
+            else:
+                sl = SWAP_LONG_CALIBRATED.get("USDJPY", 0.0)
+                ss = SWAP_SHORT_CALIBRATED.get("USDJPY", 0.0)
+                if abs(sl) > 1e-6 or abs(ss) > 1e-6:
+                    carry_sign = 1.0 if sl >= ss else -1.0
+                else:
+                    carry_sign = 1.0
+            
+            if trend_sign == carry_sign:
+                return trend_sign
+            else:
+                return 0.5 * trend_sign
+
+        return trend_sign
 
 class MarkovRewardEnv(ICEnv):
     def __init__(self, *args, **kwargs):
@@ -805,10 +890,10 @@ class MarkovRewardEnv(ICEnv):
         return float(reward)
 
 class TargetWeightEnv(MarkovRewardEnv):
-    def __init__(self, *a, turnover_penalty_lambda=0.0, is_eval=False, **kw):
+    def __init__(self, *a, turnover_penalty_lambda=0.0, is_eval=False, decision_interval=16, **kw):
         self._turnover_penalty_lambda = turnover_penalty_lambda
         self._is_eval = is_eval
-        super().__init__(*a, **kw)
+        super().__init__(*a, decision_interval=decision_interval, **kw)
         d = dict(self.observation_space.spaces)
         d["pos_state"] = spaces.Box(-np.inf, np.inf, shape=(len(self.trading_symbols),), dtype=np.float64)
         d["dsr_state"] = spaces.Box(-np.inf, np.inf, shape=(2,), dtype=np.float64)
@@ -886,15 +971,15 @@ class TargetWeightEnv(MarkovRewardEnv):
         self._last_norm_raw_weighted = 0.0
         self._last_norm_pen_weighted = 0.0
         self._last_weights = np.zeros(len(self.trading_symbols), dtype=np.float64)
-        
+
         preserve = False
         if options is not None and isinstance(options, dict):
             preserve = options.get("preserve_trackers", False)
-            
+
         if not preserve:
             self.raw_tracker = EmaVarianceTracker(alpha=0.01, initial_var=1.0, floor=1e-3)
             self.pen_tracker = EmaVarianceTracker(alpha=0.01, initial_var=0.1, floor=1e-3)
-            
+
         self.feature_normalizer = None
 
         self.rollout_raw_rewards = self.rollout_raw_rewards[-2048:]
@@ -908,9 +993,10 @@ class TargetWeightEnv(MarkovRewardEnv):
         closed_info = {s: [] for s in self.trading_symbols}
         eq = self.unwrapped.simulator.equity
         turnover = 0.0
-        diffs = np.abs(w - self._last_actions)
+        w_clipped = np.clip(w, 0.0, 1.0)
+        diffs = np.abs(w_clipped - self._last_actions)
         self._action_diffs.extend(diffs.tolist())
-        self._last_actions = w.copy()
+        self._last_actions = w_clipped.copy()
         for i, s in enumerate(self.trading_symbols):
             si = self.unwrapped.simulator.symbols_info[s]
             px = self.unwrapped.simulator.price_at(s, self.unwrapped.simulator.current_time)["Open"]
@@ -918,25 +1004,26 @@ class TargetWeightEnv(MarkovRewardEnv):
             s_idx = self.symbol_to_idx[s]
             current_vol = float(VOL_MATRIX[tp_idx, s_idx])
             ann = current_vol * math.sqrt(96 * 252)
-            a_i = float(w[i])
-            directional_w_i = a_i * 1.5
+            u_i = float(w_clipped[i])
+            dir_i = float(self.get_directional_signal(s))
+            position_w_i = u_i * dir_i
             unit_ratio = self.unwrapped.simulator._get_unit_ratio(s, self.unwrapped.simulator.current_time)
             notional_per_lot = px * si.trade_contract_size * unit_ratio
             scale = eq * (self._tgtvol / (ann + 1e-12)) / (notional_per_lot + 1e-12)
             cur = self.unwrapped.simulator.symbol_orders(s)
             cur_lots = sum(o.volume * o.type.sign for o in cur)
-            
+
             c_i = REAL_COST[s] * self._cost_mult
             gamma_i = 1.0 / (1.0 + 100.0 * c_i * (ann + 1e-6))
             gamma_i = max(0.05, min(1.0, gamma_i))
-            
-            tgt_lots = (1.0 - gamma_i) * cur_lots + gamma_i * directional_w_i * scale
+
+            tgt_lots = (1.0 - gamma_i) * cur_lots + gamma_i * position_w_i * scale
             q_lots = round(tgt_lots / si.volume_step) * si.volume_step
             if abs(q_lots) < si.volume_min:
                 q_lots = 0.0
             delta = q_lots - cur_lots
             turnover += abs(delta) / (scale + 1e-12)
-            
+
             band_thr = max(si.volume_min, max(abs(tgt_lots), abs(cur_lots)) * self._band)
             if abs(delta) < band_thr:
                 orders_info[s] = dict(hold=True, target=tgt_lots, current=cur_lots)
@@ -1001,6 +1088,7 @@ class HarnessASanityWrapper(gym.Wrapper):
         super().__init__(env)
         self.W, self.D = self.unwrapped.observation_space["features"].shape
         self.num_symbols = len(self.unwrapped.trading_symbols)
+        self.unwrapped.get_directional_signal = lambda s: 1.0
 
     def _make_synthetic_obs(self, obs, tick):
         features = np.zeros((self.W, self.D), dtype=np.float32)
@@ -1013,6 +1101,7 @@ class HarnessASanityWrapper(gym.Wrapper):
         return obs
 
     def reset(self, seed=None, options=None):
+        self.unwrapped.get_directional_signal = lambda s: 1.0
         obs, info = self.env.reset(seed=seed, options=options)
         obs = self._make_synthetic_obs(obs, self.unwrapped._current_tick)
         return obs, info
@@ -1101,8 +1190,6 @@ class EVTracker(BaseCallback):
 
     def _on_step(self) -> bool:
         if hasattr(self, "should_stop") and self.should_stop:
-            if not self.silent:
-                print(f"[EARLY-STOP] Critic validation return patience gate triggered. Stopping training early.", flush=True)
             return False
         return True
 
@@ -1142,35 +1229,14 @@ class EVTracker(BaseCallback):
             grad_cos = compute_pcgrad_cosine(self.model, obs_rollout, act_rollout, raw_rews, pens)
         else:
             grad_cos = 0.0
-        
-        dormant_val = 0.0
-        policy = self.model.policy
-        policy.eval()
-        try:
-            obs_dict = {}
-            for k, v in self.model.rollout_buffer.observations.items():
-                obs_dict[k] = to_float_tensor(v[:128], policy.device).reshape((min(128, v.shape[0]*v.shape[1]),) + v.shape[2:])
-            with torch.no_grad():
-                features = policy.features_extractor(obs_dict)
-                x = features
-                total_neurons = 0
-                dormant_neurons = 0
-                for layer in policy.mlp_extractor.policy_net:
-                    if isinstance(layer, nn.Linear):
-                        x = layer(x)
-                        mean_act = torch.abs(x).mean(dim=0)
-                        dormant = (mean_act < 0.01).sum().item()
-                        dormant_neurons += dormant
-                        total_neurons += x.shape[1]
-                    elif isinstance(layer, (nn.Tanh, nn.ReLU, nn.GELU)):
-                        x = layer(x)
-                if total_neurons > 0:
-                    dormant_val = dormant_neurons / total_neurons
-        except Exception:
-            pass
-        
+
+        obs_first_batch = {k: v[0] for k, v in obs_rollout.items()}
+        dormant_val = compute_dual_zero_dormant(self.model.policy, obs_first_batch)
+
         churn_val = 0.0
         try:
+            policy = self.model.policy
+            policy.eval()
             obs_dict = {}
             for k, v in self.model.rollout_buffer.observations.items():
                 obs_dict[k] = to_float_tensor(v[:128], policy.device).reshape((min(128, v.shape[0]*v.shape[1]),) + v.shape[2:])
@@ -1182,14 +1248,14 @@ class EVTracker(BaseCallback):
                 self._prev_actions = curr_actions.clone()
             else:
                 self._prev_actions = curr_actions.clone()
+            policy.train()
         except Exception:
             pass
-        policy.train()
 
         if grad_cos < 0.0:
             self.anomalies.append(f"GradCos negative: {grad_cos:.3f} at step {step}")
         if dormant_val > 0.1:
-            self.anomalies.append(f"Dormant neurons high: {dormant_val:.2f} at step {step}")
+            self.anomalies.append(f"Dual-zero dormant high: {dormant_val:.2f} at step {step}")
 
         val_pnl = -1e9
         if self.validation_env is not None:
@@ -1197,7 +1263,7 @@ class EVTracker(BaseCallback):
             val_res = rollout(self.validation_env, lambda o, e: self.model.predict(o, deterministic=True)[0], seed=42)
             val_pnl = val_res["final_eq"] - 10000.0
             self.val_pnl_history.append(val_pnl)
-            
+
             obs, _ = self.validation_env.reset(seed=42, options={"preserve_trackers": True})
             val_rewards, val_values = [], []
             done = False
@@ -1284,7 +1350,7 @@ class EVTracker(BaseCallback):
         clip_str = f"{clip:.3f}"
         churn_str = f"{churn:.3f}"
         bndv_str = f"{bndv:.1f}%"
-        
+
         line = (
             f"{step:<8d} | "
             f"{ev_str:<6s} | "
@@ -1341,6 +1407,44 @@ class BehaviorCallback(BaseCallback):
             }
             self.rows.append(row)
         return True
+
+def run_bc_oracle_probe(env_train, oracle_policy_fn, seed=42, num_samples=2000, epochs=20):
+    policy = PPO("MultiInputPolicy", env_train, seed=seed, verbose=0,
+                 policy_kwargs=dict(features_extractor_class=MLPExtractorDSR, net_arch=[64]),
+                 learning_rate=1e-3, device="cuda" if torch.cuda.is_available() else "cpu").policy
+    optimizer = torch.optim.Adam(policy.parameters(), lr=1e-3)
+    obs_list = []
+    act_list = []
+    obs, _ = env_train.reset(seed=seed)
+    for _ in range(num_samples):
+        act = oracle_policy_fn(env_train)
+        obs_list.append(copy.deepcopy(obs))
+        act_list.append(act.copy())
+        obs, _, term, trunc, _ = env_train.step(act)
+        if term or trunc:
+            obs, _ = env_train.reset()
+    loss_val = 0.0
+    for epoch in range(epochs):
+        policy.train()
+        batch_losses = []
+        for i in range(0, len(obs_list), 64):
+            batch_obs_raw = obs_list[i : i + 64]
+            batch_act_raw = act_list[i : i + 64]
+            tensor_obs = {}
+            for k in batch_obs_raw[0].keys():
+                v_arr = np.array([o[k] for o in batch_obs_raw])
+                tensor_obs[k] = to_float_tensor(v_arr, policy.device)
+            target_act = torch.as_tensor(np.array(batch_act_raw), dtype=torch.float32, device=policy.device)
+            dist = policy.get_distribution(tensor_obs)
+            pred_act = dist.mode()
+            loss = nn.MSELoss()(pred_act, target_act)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            batch_losses.append(loss.item())
+        loss_val = float(np.mean(batch_losses))
+    bc_passed = loss_val < 0.05
+    return loss_val, bc_passed
 
 def get_fresh_sim(base_sim):
     new_sim = copy.copy(base_sim)
@@ -1429,7 +1533,7 @@ def rollout(env, policy_fn, seed):
     win_rate = float(len(pos_profits) / (len(closed_profits) + 1e-12) * 100.0) if closed_profits else 0.0
     gross_profit = float(sum(closed_profits))
     net_pnl = float(eqs[-1] - eqs[0])
-    
+
     actual_fees_closed = sum(o.volume * sim_ref.symbols_info[o.symbol].trade_contract_size * o.fee * sim_ref._get_unit_ratio(o.symbol, o.exit_time) for o in sim_ref.closed_orders)
     actual_fees_open = sum(o.volume * sim_ref.symbols_info[o.symbol].trade_contract_size * o.fee * sim_ref._get_unit_ratio(o.symbol, sim_ref.current_time) for o in sim_ref.orders)
     total_actual_fees = actual_fees_closed + actual_fees_open + sim_ref.accumulated_partial_fees
@@ -1453,7 +1557,7 @@ def rollout(env, policy_fn, seed):
     else:
         exposure_reward_corr = float('nan')
     actions_history = np.array(actions_history)
-    
+
     max_step_pct = float(np.max(np.diff(eqs)) / (eqs[-1] - eqs[0] + 1e-12) * 100.0) if (eqs[-1] - eqs[0]) > 0 else 0.0
     return dict(final_eq=float(eqs[-1]), total_ret=float(eqs[-1]/eqs[0]-1), gross_profit=gross_profit,
                 cost_paid=cost_paid, cost_drag_bps=cost_drag_bps, sortino=sortino, max_dd=dd,
@@ -1475,14 +1579,15 @@ def rollout(env, policy_fn, seed):
 def print_behavior_table(rows):
     if not rows:
         return
-    print("\\n    " + "=" * 100, flush=True)
-    print(f"    {'Step':>7} | {'PnL':>9} | {'Trades/1k':>9} | {'Hold':>6} | "
-          f"{'InMkt%':>6} | {'ChurnIdx':>8} | Risks", flush=True)
-    print("    " + "=" * 100, flush=True)
+    headers = ["Step", "PnL", "Trades/1k", "Hold", "InMkt%", "ChurnIdx", "Exposures"]
+    formatted_rows = []
     for r in rows:
-        print(f"    {r['step']:>7d} | {r['pnl']:>+9.2f} | {r['trades_1k']:>9.1f} | "
-              f"{r['hold']:>6.1f} | {r['in_mkt']:>6.1f} | {r['churn_index']:>8.3f} | {r['expo_str']}", flush=True)
-    print("    " + "=" * 100, flush=True)
+        formatted_rows.append([
+            str(r["step"]), f"{r['pnl']:>+9.2f}", f"{r['trades_1k']:>9.1f}",
+            f"{r['hold']:>6.1f}", f"{r['in_mkt']:>6.1f}", f"{r['churn_index']:>8.3f}",
+            r["expo_str"]
+        ])
+    print_table(headers, formatted_rows)
 
 def make_agent(env, seed, n_steps=1024, batch_size=128):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1498,15 +1603,10 @@ def make_sanity_agent(env, seed):
                n_steps=512, batch_size=128, learning_rate=1e-3, ent_coef=0.0,
                gamma=0.9, gae_lambda=0.95, clip_range=0.2, vf_coef=0.5, device=device)
 
-def trend_policy(env):
-    a_vals = []
-    for s in env.unwrapped.trading_symbols:
-        t_sign = env.unwrapped.get_trend_sign(s)
-        a_vals.append(t_sign / 1.5)
-    return np.array(a_vals, dtype=np.float64)
+def full_benchmark_policy(env):
+    return np.ones(len(env.unwrapped.trading_symbols), dtype=np.float64)
 
 def vol_target_policy(env):
-    curr_time = env.unwrapped.simulator.current_time
     a_vals = []
     for s in env.unwrapped.trading_symbols:
         tp_idx = env.unwrapped._pos_mapping[env.unwrapped._current_tick]
@@ -1519,7 +1619,6 @@ def vol_target_policy(env):
     return np.array(a_vals, dtype=np.float64)
 
 def reward_decomposition_diagnostic(env, model, seed, max_steps=3000):
-    t0 = time.perf_counter()
     obs, _ = env.reset(seed=seed)
     base = env.unwrapped
     raw_rewards, penalties, totals = [], [], []
@@ -1540,20 +1639,19 @@ def reward_decomposition_diagnostic(env, model, seed, max_steps=3000):
     raw_rewards = np.array(raw_rewards)
     penalties = np.array(penalties)
     totals = np.array(totals)
-    print("\\n" + "=" * 80, flush=True)
-    print("[DIAGNOSTIC-D] REWARD DECOMPOSITION", flush=True)
-    print("=" * 80, flush=True)
-    print(f"  raw DSR       : mean={np.mean(raw_rewards):+9.4f} std={safe_std(raw_rewards):8.4f}", flush=True)
-    print(f"  turnover pen. : mean={np.mean(penalties):+9.4f} std={safe_std(penalties):8.4f}", flush=True)
-    print(f"  total reward  : mean={np.mean(totals):+9.4f} std={safe_std(totals):8.4f}", flush=True)
+    print("REWARD DECOMPOSITION DIAGNOSTIC:") 
     var_raw = np.var(raw_rewards) + 1e-12
     var_pen = np.var(penalties)
-    print(f"  var(penalty)/var(raw)  = {var_pen/var_raw:.3f}", flush=True)
-    print(f"[TIME] Reward Decomposition Diagnostic completed in {time.perf_counter()-t0:.4f} seconds", flush=True)
+    rows = [
+        ["raw DSR", f"{np.mean(raw_rewards):+9.4f}", f"{safe_std(raw_rewards):8.4f}"],
+        ["turnover pen.", f"{np.mean(penalties):+9.4f}", f"{safe_std(penalties):8.4f}"],
+        ["total reward", f"{np.mean(totals):+9.4f}", f"{safe_std(totals):8.4f}"],
+        ["var(penalty)/var(raw)", f"{var_pen/var_raw:.3f}", "N/A"]
+    ]
+    print_table(["Component", "Mean", "Std"], rows)
     return dict(raw=raw_rewards, penalty=penalties, total=totals)
 
 def action_saturation_diagnostic(env, model, seed, threshold=0.95, max_steps=3000):
-    t0 = time.perf_counter()
     obs, _ = env.reset(seed=seed)
     actions = []
     n, done = 0, False
@@ -1564,22 +1662,21 @@ def action_saturation_diagnostic(env, model, seed, threshold=0.95, max_steps=300
         done = term or trunc
         n += 1
     actions = np.array(actions)
-    print("\\n" + "=" * 80, flush=True)
-    print(f"[DIAGNOSTIC-E] ACTION MAGNITUDE SATURATION CHECK", flush=True)
-    print("=" * 80, flush=True)
+    print("ACTION MAGNITUDE SATURATION DIAGNOSTIC:")
+    rows = []
     for i, s in enumerate(env.unwrapped.trading_symbols):
         mags = np.abs(actions[:, i])
         sat_frac = float(np.mean(mags > threshold))
         mean_mag = float(np.mean(mags))
         std_mag = float(np.std(mags))
         if sat_frac > 0.8:
-            verdict = "FULLY SATURATED MAGNITUDE"
+            verdict = "FULLY SATURATED"
         elif sat_frac > 0.5:
             verdict = "HIGH MAGNITUDE"
         else:
             verdict = "OK"
-        print(f"  {s:8s}: saturation_frac={sat_frac:5.1%}  mean_mag={mean_mag:.3f}  std_mag={std_mag:.3f} -> {verdict}", flush=True)
-    print(f"[TIME] Action Saturation Diagnostic completed in {time.perf_counter()-t0:.4f} seconds", flush=True)
+        rows.append([s, f"{sat_frac:5.1%}", f"{mean_mag:.3f}", f"{std_mag:.3f}", verdict])
+    print_table(["Symbol", "Saturation Frac", "Mean Mag", "Std Mag", "Verdict"], rows)
     return actions
 
 def corrected_welch_ttest(a, b, o_factor):
@@ -1637,7 +1734,6 @@ def test_swap_calibration():
             factors.append(w_clean / w_raw)
     g_f = np.mean(factors) if factors else 1.0
     assert g_f > 0.0
-    print("[SANITY-UNIT] Swap Calibration Logic Check: PASS", flush=True)
 
 def test_dsr_formula():
     alpha = 0.004
@@ -1650,7 +1746,6 @@ def test_dsr_formula():
     expected_r2 = (R2 * p_vol_sq - 0.5 * e_ret_1 * (p_vol_sq + R2 ** 2)) / (p_vol_sq ** 1.5)
     assert abs(expected_r1 - 0.326707) < 1e-4
     assert not math.isnan(expected_r2)
-    print("[SANITY-UNIT] DSR Math Formulation Check: PASS", flush=True)
 
 def test_order_sizing():
     assert len(symbols) > 0
@@ -1668,8 +1763,6 @@ def test_order_sizing():
     notional_per_lot = px * contract_size * unit_ratio
     scale = eq * (tgtvol / ann_vol) / notional_per_lot
     assert abs(scale - 0.045454545) < 1e-6
-    print("[SANITY-UNIT] Sizing Constants Assertion: PASS", flush=True)
-    print("[SANITY-UNIT] Target Lot Size Calculation Check: PASS", flush=True)
 
 def test_swap_calculation_with_known_numeric():
     class MockSymbolInfo:
@@ -1702,7 +1795,6 @@ def test_swap_calculation_with_known_numeric():
     sim_m.tick(timedelta(days=1))
     expected_balance = 10000.0 - 4.5
     assert abs(sim_m.balance - expected_balance) < 1e-6
-    print("[SANITY-UNIT] Swap Numeric Calculation Check: PASS", flush=True)
 
 def verify_no_lookahead(env):
     env.reset(seed=1)
@@ -1712,7 +1804,6 @@ def verify_no_lookahead(env):
         df = env.unwrapped.original_simulator.symbols_data[s]
         idx_val = df.index.get_indexer([current_time], method=None)[0]
         assert idx_val < len(df)
-    print("[SANITY-UNIT] Look-ahead Bias Prevention Check: PASS", flush=True)
 
 def verify_reproducibility(env_fn, policy_fn, seed=123):
     e1 = env_fn()
@@ -1730,7 +1821,6 @@ def verify_reproducibility(env_fn, policy_fn, seed=123):
         assert abs(info1["equity"] - info2["equity"]) < 1e-12
         if term1 or trunc1:
             break
-    print("[SANITY-UNIT] Complete Path Reproducibility Check: PASS", flush=True)
 
 def train_seed_worker(sd, symbols, WINDOW, val_ep_len, STEPS, n_steps, batch_size, EVAL_SEEDS, lambda_val):
     log_path = f"/tmp/crash_seed_{sd}_lambda_{lambda_val}.log"
@@ -1739,7 +1829,7 @@ def train_seed_worker(sd, symbols, WINDOW, val_ep_len, STEPS, n_steps, batch_siz
         with open(log_path, "w") as lf:
             faulthandler.enable(file=lf)
         global tp_train, tp_val
-        
+
         random.seed(sd)
         np.random.seed(sd)
         torch.manual_seed(sd)
@@ -1750,48 +1840,48 @@ def train_seed_worker(sd, symbols, WINDOW, val_ep_len, STEPS, n_steps, batch_siz
             torch.use_deterministic_algorithms(True, warn_only=True)
         except AttributeError:
             pass
-            
+
         sim_local = ICSimulator(unit="USD", balance=10_000., leverage=100., hedge=False)
         sim_local.symbols_info = symbols_info_dict
         sim_local.symbols_data = {s: final_symbols_data[s].loc[STATE_INDEX] for s in symbols}
-        
+
         val_third = len(tp_val) // 3
         tp_val_1_local = tp_val[:val_third]
         tp_val_2_local = tp_val[val_third : 2 * val_third]
         tp_val_3_local = tp_val[2 * val_third :]
         tp_val_selection_local = tp_val[:2 * val_third]
-        
+
         val_selection_ep_len = min(5000, len(tp_val_selection_local) - WINDOW - 10)
-        
-        env_train_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_train, turnover_penalty_lambda=lambda_val, decision_interval=96), ep_len=5000))
-        env_val_selection_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_val_selection_local, turnover_penalty_lambda=lambda_val, is_eval=True, decision_interval=96), ep_len=val_selection_ep_len))
-        
+
+        env_train_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_train, turnover_penalty_lambda=lambda_val, decision_interval=16), ep_len=5000))
+        env_val_selection_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_val_selection_local, turnover_penalty_lambda=lambda_val, is_eval=True, decision_interval=16), ep_len=val_selection_ep_len))
+
         ag = make_agent(env_train_local, sd, n_steps=n_steps, batch_size=batch_size)
         ev_tracker = EVTracker(every=1000, value_net_module=ag.policy.value_net, validation_env=env_val_selection_local, silent=True)
         beh_callback = BehaviorCallback(probe_env=env_val_selection_local, every=1000)
         ag.learn(total_timesteps=STEPS, callback=[ev_tracker, beh_callback])
-        
-        env_val_1_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_val_1_local, turnover_penalty_lambda=lambda_val, is_eval=True, decision_interval=96), ep_len=min(val_selection_ep_len, len(tp_val_1_local) - WINDOW - 10)))
-        env_val_2_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_val_2_local, turnover_penalty_lambda=lambda_val, is_eval=True, decision_interval=96), ep_len=min(val_selection_ep_len, len(tp_val_2_local) - WINDOW - 10)))
-        env_val_3_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_val_3_local, turnover_penalty_lambda=lambda_val, is_eval=True, decision_interval=96), ep_len=min(5000, len(tp_val_3_local) - WINDOW - 10)))
-        
+
+        env_val_1_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_val_1_local, turnover_penalty_lambda=lambda_val, is_eval=True, decision_interval=16), ep_len=min(val_selection_ep_len, len(tp_val_1_local) - WINDOW - 10)))
+        env_val_2_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_val_2_local, turnover_penalty_lambda=lambda_val, is_eval=True, decision_interval=16), ep_len=min(val_selection_ep_len, len(tp_val_2_local) - WINDOW - 10)))
+        env_val_3_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_val_3_local, turnover_penalty_lambda=lambda_val, is_eval=True, decision_interval=16), ep_len=min(5000, len(tp_val_3_local) - WINDOW - 10)))
+
         eval_results = []
         for esd in EVAL_SEEDS:
             agent_res = rollout(env_val_3_local, lambda o, e: ag.predict(o, deterministic=True)[0], esd)
             pnl_full = agent_res["final_eq"] - 10000.0
             sortino_full = agent_res["sortino"]
             mdd_full = agent_res["max_dd"]
-            
+
             res_1 = rollout(env_val_1_local, lambda o, e: ag.predict(o, deterministic=True)[0], esd)
             pnl_1 = res_1["final_eq"] - 10000.0
             sortino_1 = res_1["sortino"]
             mdd_1 = res_1["max_dd"]
-            
+
             res_2 = rollout(env_val_2_local, lambda o, e: ag.predict(o, deterministic=True)[0], esd)
             pnl_2 = res_2["final_eq"] - 10000.0
             sortino_2 = res_2["sortino"]
             mdd_2 = res_2["max_dd"]
-            
+
             eval_results.append({
                 "Full Holdout": (pnl_full, sortino_full, mdd_full),
                 "Slice 1 (Early)": (pnl_1, sortino_1, mdd_1),
@@ -1828,16 +1918,16 @@ def summarize(tag, runs):
                 vals.append(v_val)
         agg[k] = (float(np.mean(vals)), float(safe_std(vals))) if vals else (0.0, 0.0)
     exp_corr_mean, exp_corr_std = agg.get('exposure_reward_corr', (0.0, 0.0))
-    print(f"  {tag:18s}: eq={agg['final_eq'][0]:9.2f}±{agg['final_eq'][1]:7.2f} "
-          f"sortino={agg['sortino'][0]:6.2f}±{agg['sortino'][1]:.2f} "
-          f"skew={agg['skew'][0]:+5.2f} kurt={agg['kurtosis'][0]:5.2f} cvar95={agg['cvar_95'][0]:+6.4f} "
-          f"PF={agg['profit_factor'][0]:4.2f} WR%={agg['win_rate'][0]:5.1f}% drag_bps={agg['cost_drag_bps'][0]:6.1f} "
-          f"spread_bps={agg['spread_cost_bps'][0]:5.1f} swap_bps={agg['swap_cost_bps'][0]:5.1f} open_pnl_pct={agg['pct_of_total_pnl_from_open_positions'][0]:5.1f}% "
-          f"exposure_corr={exp_corr_mean:+5.3f} max_step_pct={agg.get('max_step_pct', (0.0, 0.0))[0]:.1f}%", flush=True)
-    any_unreliable = any(r.get("unreliable_sortino", False) for r in runs)
-    if any_unreliable:
-         print(f"    >> WARNING: Sortino statistics in {tag} are computed from fewer than 30 downside observations.", flush=True)
-    return agg
+    return agg, [
+        tag,
+        f"{agg['final_eq'][0]:.2f}",
+        f"{agg['sortino'][0]:.2f}",
+        f"{agg['skew'][0]:+.2f}",
+        f"{agg['kurtosis'][0]:.2f}",
+        f"{agg['cvar_95'][0]:+.4f}",
+        f"{agg['profit_factor'][0]:.2f}",
+        f"{agg['win_rate'][0]:.1f}%"
+    ]
 
 def make_synthetic_symbols_data(symbols, time_points):
     res = {}
@@ -1949,6 +2039,8 @@ import core_logic
 importlib.reload(core_logic)
 from core_logic import *
 
+execution_timing_ledger = []
+
 def calculate_psi(train_col, val_col, num_bins=10):
     percentiles = np.linspace(0, 100, num_bins + 1)
     bin_edges = np.percentile(train_col, percentiles)
@@ -1974,21 +2066,17 @@ def run_distribution_shift_diagnostic(model=None):
     train_feats = STATE_MATRIX[:i_tr]
     val_feats = STATE_MATRIX[i_tr + EMBARGO:]
     num_features = train_feats.shape[1]
-    print("\n" + "=" * 100, flush=True)
-    print("CRITIC GENERALIZATION & FEATURE SHIFT CORRELATION (TRAIN VS VAL SLICE)", flush=True)
-    print("=" * 100, flush=True)
-    print(f"{'Feature Name':<25} | {'PSI':<8} | {'KS Stat':<8} | {'KS p-value':<10} | {'Critic Corr':<11} | {'Verdict':<15}", flush=True)
-    print("-" * 100, flush=True)
     corrs = [0.0] * num_features
     if model is not None:
         try:
             sim_local = ICSimulator(unit="USD", balance=10_000., leverage=100., hedge=False)
             sim_local.symbols_info = symbols_info_dict
             sim_local.symbols_data = {s: final_symbols_data[s].loc[STATE_INDEX] for s in symbols}
-            env_val_diag = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_val, is_eval=True), ep_len=1000))
+            env_val_diag = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim_local), symbols, WINDOW, tp_val, is_eval=True, decision_interval=16), ep_len=1000))
             corrs = compute_shift_error_correlation(env_val_diag, model, 42)
         except Exception:
             pass
+    rows = []
     major_shift_count = 0
     for idx in range(min(num_features, 10)):
         col_name = STATE_COLUMNS[idx] if idx < len(STATE_COLUMNS) else f"Col_{idx}"
@@ -2004,10 +2092,9 @@ def run_distribution_shift_diagnostic(model=None):
             verdict = "SLIGHT SHIFT"
         else:
             verdict = "NO SHIFT"
-        print(f"{col_name[:25]:<25} | {psi_val:<8.4f} | {ks_stat:<8.4f} | {p_val:<10.2e} | {corr_val:<+11.4f} | {verdict:<15}", flush=True)
-    print("-" * 100, flush=True)
-    print(f"Summary: {major_shift_count} out of {min(num_features, 10)} features show major distribution shift (PSI > 0.2).", flush=True)
-    print("=" * 100, flush=True)
+        rows.append([col_name[:25], f"{psi_val:.4f}", f"{ks_stat:.4f}", f"{p_val:.2e}", f"{corr_val:+.4f}", verdict])
+    print("\nCRITIC GENERALIZATION & FEATURE SHIFT DIAGNOSTIC:")
+    print_table(["Feature", "PSI", "KS Stat", "KS p-val", "Critic Corr", "Verdict"], rows)
 
 if __name__ == '__main__':
     multiprocessing.freeze_support()
@@ -2038,9 +2125,7 @@ if __name__ == '__main__':
             except Exception:
                 pass
 
-    print("\n" + "=" * 50, flush=True)
-    print("SYMBOL PROPERTIES INTEGRITY DIAGNOSTIC", flush=True)
-    print("=" * 50, flush=True)
+    sym_rows = []
     for s in symbols:
         si = symbols_info_dict.get(s)
         has_pt = hasattr(si, "point")
@@ -2056,86 +2141,71 @@ if __name__ == '__main__':
                 spread_pts = getattr(si, "spread", 2.0)
         else:
             spread_pts = getattr(si, "spread", 2.0)
-        print(f"Symbol: {s:8s} | Has Point: {str(has_pt):5s} ({pt_val}) -> Est: {point_val} | Has Spread: {str(has_spr):5s} ({spr_val}) -> Est: {spread_pts}", flush=True)
-    print("=" * 50, flush=True)
+        sym_rows.append([s, str(has_pt), str(pt_val), str(point_val), str(has_spr), str(spr_val), str(spread_pts)])
+
+    print("\nSYMBOL PROPERTIES INTEGRITY DIAGNOSTIC:")
+    print_table(["Symbol", "Has Point", "Raw Pt", "Est Pt", "Has Spread", "Raw Spr", "Est Spr"], sym_rows)
 
     diagnostic_ledger = {}
 
-    print("\n" + "=" * 50, flush=True)
-    print("STANDALONE PURE FUNCTION ASSERTIONS", flush=True)
-    print("=" * 50, flush=True)
-    print(f"{'Test Description':<35} | {'Result':<10}", flush=True)
-    print("-" * 50, flush=True)
-    
+    sanity_tests_start = time.perf_counter()
+
     test_swap_cal_passed = True
     try:
         test_swap_calibration()
-        print(f"{'Swap Calibration Logic Check':<35} | {'PASS':<10}", flush=True)
     except Exception:
         test_swap_cal_passed = False
-        print(f"{'Swap Calibration Logic Check':<35} | {'FAIL':<10}", flush=True)
     diagnostic_ledger["swap_cal"] = "PASS" if test_swap_cal_passed else "FAIL"
 
     test_dsr_formula_passed = True
     try:
         test_dsr_formula()
-        print(f"{'DSR Math Formulation Check':<35} | {'PASS':<10}", flush=True)
     except Exception:
         test_dsr_formula_passed = False
-        print(f"{'DSR Math Formulation Check':<35} | {'FAIL':<10}", flush=True)
     diagnostic_ledger["dsr_formula"] = "PASS" if test_dsr_formula_passed else "FAIL"
 
     test_order_sizing_passed = True
     try:
         test_order_sizing()
-        print(f"{'Sizing Constants Assertion':<35} | {'PASS':<10}", flush=True)
     except Exception:
         test_order_sizing_passed = False
-        print(f"{'Sizing Constants Assertion':<35} | {'FAIL':<10}", flush=True)
     diagnostic_ledger["order_sizing"] = "PASS" if test_order_sizing_passed else "FAIL"
 
     test_swap_calc_numeric_passed = True
     try:
         test_swap_calculation_with_known_numeric()
-        print(f"{'Swap Numeric Calculation Check':<35} | {'PASS':<10}", flush=True)
     except Exception:
         test_swap_calc_numeric_passed = False
-        print(f"{'Swap Numeric Calculation Check':<35} | {'FAIL':<10}", flush=True)
     diagnostic_ledger["swap_calc_numeric"] = "PASS" if test_swap_calc_numeric_passed else "FAIL"
 
     sanity_sim = ICSimulator(unit="USD", balance=10_000., leverage=100., hedge=False)
     sanity_sim.symbols_info = symbols_info_dict
     sanity_sim.symbols_data = make_synthetic_symbols_data(symbols, tp_train)
 
-    sanity_base = TargetWeightEnv(sanity_sim, symbols, WINDOW, tp_train, decision_interval=96)
+    sanity_base = TargetWeightEnv(sanity_sim, symbols, WINDOW, tp_train, decision_interval=16)
     sanity_sub = SubEpisodeEnv(sanity_base, ep_len=2000)
     sanity_wrapped = HarnessASanityWrapper(BootstrapFix(sanity_sub))
 
     verify_no_lookahead_passed = True
     try:
         verify_no_lookahead(sanity_wrapped)
-        print(f"{'Look-ahead Bias Prevention Check':<35} | {'PASS':<10}", flush=True)
     except Exception:
         verify_no_lookahead_passed = False
-        print(f"{'Look-ahead Bias Prevention Check':<35} | {'FAIL':<10}", flush=True)
     diagnostic_ledger["lookahead"] = "PASS" if verify_no_lookahead_passed else "FAIL"
 
     verify_reproducibility_passed = True
     try:
         verify_reproducibility(
-            lambda: HarnessASanityWrapper(BootstrapFix(SubEpisodeEnv(TargetWeightEnv(sanity_sim, symbols, WINDOW, tp_train, decision_interval=96), ep_len=2000))),
-            lambda obs, env: np.zeros(len(symbols))
+            lambda: HarnessASanityWrapper(BootstrapFix(SubEpisodeEnv(TargetWeightEnv(sanity_sim, symbols, WINDOW, tp_train, decision_interval=16), ep_len=2000))),
+            lambda obs, env: np.ones(len(symbols))
         )
-        print(f"{'Complete Path Reproducibility Check':<35} | {'PASS':<10}", flush=True)
     except Exception:
         verify_reproducibility_passed = False
-        print(f"{'Complete Path Reproducibility Check':<35} | {'FAIL':<10}", flush=True)
     diagnostic_ledger["reproducibility"] = "PASS" if verify_reproducibility_passed else "FAIL"
-    print("=" * 50, flush=True)
 
-    print("\n" + "=" * 80, flush=True)
-    print("[M-SANITY] ORACLE POLICY GATE & HARNESS A SANITY PRE-TRAINING", flush=True)
-    print("=" * 80, flush=True)
+    unit_test_rows = [[k, v] for k, v in diagnostic_ledger.items()]
+    print("\nSTANDALONE PURE FUNCTION ASSERTIONS:")
+    print_table(["Test Description", "Result"], unit_test_rows)
 
     def oracle_policy(env):
         tick = env.unwrapped._current_tick
@@ -2143,15 +2213,16 @@ if __name__ == '__main__':
         for i, s in enumerate(env.unwrapped.trading_symbols):
             phase = i * np.pi / 3.0
             val = np.cos(tick / 5.0 + phase)
-            a_vals.append(1.0 if val >= 0 else -1.0)
+            a_vals.append(1.0 if val >= 0.0 else 0.0)
         return np.array(a_vals, dtype=np.float64)
 
     oracle_res = rollout(sanity_wrapped, lambda o, e: oracle_policy(e), seed=42)
     dummy_res = rollout(sanity_wrapped, lambda o, e: np.zeros(len(symbols)), seed=42)
     oracle_passed = bool(oracle_res["final_eq"] > dummy_res["final_eq"])
     diagnostic_ledger["oracle_gate"] = "PASS" if oracle_passed else "FAIL"
-    print(f"  Oracle Policy execution: final_eq={oracle_res['final_eq']:.2f} | Dummy baseline: final_eq={dummy_res['final_eq']:.2f}", flush=True)
-    print(f"  Oracle policy gate validation: {'PASS' if oracle_passed else 'FAIL'}", flush=True)
+
+    bc_loss_val, bc_passed = run_bc_oracle_probe(sanity_wrapped, oracle_policy, seed=42)
+    diagnostic_ledger["bc_oracle_probe"] = "PASS" if bc_passed else "FAIL"
 
     sanity_sim_train = ICSimulator(unit="USD", balance=10_000., leverage=100., hedge=False)
     sanity_sim_train.symbols_info = symbols_info_dict
@@ -2159,7 +2230,7 @@ if __name__ == '__main__':
 
     sanity_base_train = TargetWeightEnv(
         sanity_sim_train, symbols, WINDOW, tp_train,
-        cost_multiplier=0.0, turnover_penalty_lambda=0.0, decision_interval=96
+        cost_multiplier=0.0, turnover_penalty_lambda=0.0, decision_interval=16
     )
     sanity_sub_train = SubEpisodeEnv(sanity_base_train, ep_len=2000)
     sanity_wrapped_train = HarnessASanityWrapper(BootstrapFix(sanity_sub_train))
@@ -2170,7 +2241,7 @@ if __name__ == '__main__':
 
     sanity_base_val = TargetWeightEnv(
         sanity_sim_val, symbols, WINDOW, tp_train,
-        cost_multiplier=0.0, turnover_penalty_lambda=0.0, decision_interval=96
+        cost_multiplier=0.0, turnover_penalty_lambda=0.0, decision_interval=16
     )
     sanity_sub_val = SubEpisodeEnv(sanity_base_val, ep_len=2000)
     sanity_wrapped_val = HarnessASanityWrapper(BootstrapFix(sanity_sub_val))
@@ -2182,7 +2253,7 @@ if __name__ == '__main__':
     sanity_res = rollout(sanity_wrapped_train, lambda o, e: sanity_agent.predict(o, deterministic=True)[0], seed=42)
     sanity_eq = sanity_res["final_eq"]
     dummy_eq = dummy_res["final_eq"]
-    
+
     sanity_evs = sanity_cb[0].ev_history
     sanity_pnls = sanity_cb[0].val_pnl_history
     passed_sanity_ev = (len(sanity_evs) > 0 and sanity_evs[-1] > sanity_evs[0])
@@ -2199,16 +2270,10 @@ if __name__ == '__main__':
     sanity_passed = bool(sanity_eq > dummy_eq and passed_sanity_ev and passed_sanity_slope)
     diagnostic_ledger["sanity_rl_harness"] = "PASS" if sanity_passed else "FAIL"
 
-    print(f"  synthetic sanity results: final_eq={sanity_eq:.2f} | dummy baseline: final_eq={dummy_eq:.2f}", flush=True)
-    print(f"  synthetic pre-training sanity check (Harness A): {'PASS' if sanity_passed else 'FAIL'}", flush=True)
-    print("=" * 80, flush=True)
+    execution_timing_ledger.append(["Unit Sanity & BC Probe", f"{time.perf_counter() - sanity_tests_start:.4f}"])
 
-    print("\n" + "=" * 50, flush=True)
-    print("DIAGNOSTIC SANITY LEDGER SUMMARY", flush=True)
-    print("=" * 50, flush=True)
-    for k, v in diagnostic_ledger.items():
-        print(f"  {k:<25} : {v}", flush=True)
-    print("=" * 50, flush=True)
+    print("\nDIAGNOSTIC SANITY LEDGER SUMMARY:")
+    print_table(["Module", "Status"], [[k, v] for k, v in diagnostic_ledger.items()])
 
     mandatory_failures = [k for k, v in diagnostic_ledger.items() if v == "FAIL"]
     if mandatory_failures:
@@ -2219,44 +2284,43 @@ if __name__ == '__main__':
     sim = ICSimulator(unit="USD", balance=10_000., leverage=100., hedge=False)
     sim.symbols_info, sim.symbols_data = symbols_info_dict, {s: final_symbols_data[s].loc[STATE_INDEX] for s in symbols}
 
-    env_train = BootstrapFix(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_train, decision_interval=96))
+    env_train = BootstrapFix(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_train, decision_interval=16))
 
     val_ep_len = min(5000, len(tp_val) - WINDOW - 10)
-    
+
     tp_val_selection = tp_val[:2 * val_third]
     tp_val_holdout = tp_val_3
-    
+
     val_selection_ep_len = min(5000, len(tp_val_selection) - WINDOW - 10)
     val_holdout_ep_len = min(5000, len(tp_val_holdout) - WINDOW - 10)
-    
-    env_val_selection_setup = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_selection, is_eval=True, decision_interval=96), ep_len=val_selection_ep_len))
-    env_val_holdout = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, is_eval=True, decision_interval=96), ep_len=val_holdout_ep_len))
+
+    env_val_selection_setup = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_selection, is_eval=True, decision_interval=16), ep_len=val_selection_ep_len))
+    env_val_holdout = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, is_eval=True, decision_interval=16), ep_len=val_holdout_ep_len))
 
     env_train.reset(seed=1)
     eq_a = env_train.unwrapped.simulator.balance
     env_val_selection_setup.reset(seed=1)
-    env_val_selection_setup.step(np.ones(len(symbols)) * -1.0)
+    env_val_selection_setup.step(np.ones(len(symbols)))
     assert env_train.unwrapped.simulator.balance == eq_a
 
-    print("=" * 80, flush=True)
-    print("[M-PRE] NULLS + SANITY บน env_val", flush=True)
     nulls_start = time.perf_counter()
 
     flat = rollout(env_val_selection_setup, lambda o, e: np.zeros(len(symbols)), seed=42)
     assert abs(flat["final_eq"] - 10_000.0) < 0.01
-    print(f"  flat sanity: eq={flat['final_eq']:.4f} -> PASS", flush=True)
 
-    print("\n" + "=" * 80, flush=True)
-    print("[M-VOL-CHECK] ANNUALIZED ROLLING VOLATILITY STATISTICS (VAL PERIOD)", flush=True)
+    vol_stat_rows = []
     for s in symbols:
         vols_val = []
         for t in tp_val:
             vols_val.append(VOL_MATRIX[STATE_INDEX.get_indexer([t], method='pad')[0], symbols.index(s)] * math.sqrt(96 * 252))
         vols_val = np.array(vols_val)
-        print(f"  symbol {s:8s}: mean_ann_vol={np.mean(vols_val):.6f} std_ann_vol={np.std(vols_val):.6f}", flush=True)
+        vol_stat_rows.append([s, f"{np.mean(vols_val):.6f}", f"{np.std(vols_val):.6f}"])
 
-    env_val_1_setup = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_1, is_eval=True, decision_interval=96), ep_len=min(val_ep_len, len(tp_val_1) - WINDOW - 10)))
-    env_val_2_setup = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_2, is_eval=True, decision_interval=96), ep_len=min(val_ep_len, len(tp_val_2) - WINDOW - 10)))
+    print("\nANNUALIZED ROLLING VOLATILITY STATISTICS (VAL PERIOD):")
+    print_table(["Symbol", "Mean Ann Vol", "Std Ann Vol"], vol_stat_rows)
+
+    env_val_1_setup = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_1, is_eval=True, decision_interval=16), ep_len=min(val_ep_len, len(tp_val_1) - WINDOW - 10)))
+    env_val_2_setup = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_2, is_eval=True, decision_interval=16), ep_len=min(val_ep_len, len(tp_val_2) - WINDOW - 10)))
     env_val_3_setup = env_val_holdout
 
     NULL_EVAL_CACHE = {
@@ -2270,31 +2334,31 @@ if __name__ == '__main__':
         ("Slice 2 (Mid)", env_val_2_setup),
         ("Full Holdout", env_val_holdout)
     ]:
-        trend_results = []
+        full_bm_results = []
         vol_results = []
-        trend_pnls = []
-        trend_sortinos = []
+        full_bm_pnls = []
+        full_bm_sortinos = []
         vol_pnls = []
         vol_sortinos = []
         for esd in EVAL_SEEDS:
-            trend_res = rollout(s_env, lambda o, e: trend_policy(e), esd)
-            trend_results.append(trend_res)
-            trend_pnls.append(trend_res["final_eq"] - 10000.0)
-            trend_sortinos.append(trend_res["sortino"])
+            bm_res = rollout(s_env, lambda o, e: full_benchmark_policy(e), esd)
+            full_bm_results.append(bm_res)
+            full_bm_pnls.append(bm_res["final_eq"] - 10000.0)
+            full_bm_sortinos.append(bm_res["sortino"])
 
             vol_res = rollout(s_env, lambda o, e: vol_target_policy(e), esd)
             vol_results.append(vol_res)
             vol_pnls.append(vol_res["final_eq"] - 10000.0)
             vol_sortinos.append(vol_res["sortino"])
 
-        best_null_pnls = trend_pnls if np.mean(trend_pnls) > np.mean(vol_pnls) else vol_pnls
-        best_null_sortinos = trend_sortinos if np.mean(trend_pnls) > np.mean(vol_pnls) else vol_sortinos
+        best_null_pnls = full_bm_pnls if np.mean(full_bm_pnls) > np.mean(vol_pnls) else vol_pnls
+        best_null_sortinos = full_bm_sortinos if np.mean(full_bm_pnls) > np.mean(vol_pnls) else vol_sortinos
 
         NULL_EVAL_CACHE[period_key] = {
-            "trend_results": trend_results,
+            "trend_results": full_bm_results,
             "vol_results": vol_results,
-            "trend_pnls": trend_pnls,
-            "trend_sortinos": trend_sortinos,
+            "trend_pnls": full_bm_pnls,
+            "trend_sortinos": full_bm_sortinos,
             "vol_pnls": vol_pnls,
             "vol_sortinos": vol_sortinos,
             "best_null_pnls": best_null_pnls,
@@ -2302,18 +2366,19 @@ if __name__ == '__main__':
             "best_null_mean": np.mean(best_null_pnls)
         }
 
-    null_trend = NULL_EVAL_CACHE["Full Holdout"]["trend_results"]
-    agg_trend = summarize("null:trend", null_trend)
+    null_full_bm = NULL_EVAL_CACHE["Full Holdout"]["trend_results"]
+    agg_full_bm, row_full_bm = summarize("null:full-benchmark", null_full_bm)
 
-    assert agg_trend["pct_in_market"][0] > 10 and agg_trend["trades_per_1k"][0] > 0
+    assert agg_full_bm["pct_in_market"][0] > 10 and agg_full_bm["trades_per_1k"][0] > 0
 
     null_vol_target = NULL_EVAL_CACHE["Full Holdout"]["vol_results"]
-    agg_vol_target = summarize("null:vol-target", null_vol_target)
+    agg_vol_target, row_vol_target = summarize("null:vol-target", null_vol_target)
 
-    print(f"[TIME] Null Baselines Rollout completed in {time.perf_counter() - nulls_start:.4f} seconds", flush=True)
+    print("\nBENCHMARK NULL POLICIES SUMMARY:")
+    print_table(["Policy", "Eq", "Sortino", "Skew", "Kurt", "CVaR95", "PF", "WR%"], [row_full_bm, row_vol_target])
 
-    print("\n" + "=" * 80, flush=True)
-    print("[M-TRAIN] learning + behavior (PARALLEL MULTI-SEED & ABLATION STUDY)", flush=True)
+    execution_timing_ledger.append(["Null Baselines Rollout", f"{time.perf_counter() - nulls_start:.4f}"])
+
     train_start = time.perf_counter()
 
     LAMBDA_CONFIGS = [0.0, 0.01, 0.05]
@@ -2328,12 +2393,6 @@ if __name__ == '__main__':
         for lambda_val in LAMBDA_CONFIGS:
             ablation_tasks.append((sd, lambda_val))
 
-    print("=" * 80, flush=True)
-    print("MONITORING ACTIVE ABLATION WORKERS", flush=True)
-    print("=" * 80, flush=True)
-    print(f"{'Time':<8} | {'Seed':<4} | {'Lambda':<6} | {'PID':<6} | {'Event':<10} | {'RSS (MB)':<10} | {'Exit Code':<9}", flush=True)
-    print("-" * 80, flush=True)
-
     while ablation_tasks or active_processes:
         while len(active_processes) < MAX_CONCURRENT_WORKERS and ablation_tasks:
             sd, lambda_val = ablation_tasks.pop(0)
@@ -2344,13 +2403,9 @@ if __name__ == '__main__':
                     batch_size, EVAL_SEEDS, lambda_val
                 )
             )
-            t_start_0 = time.perf_counter()
             p.start()
-            t_start_elapsed = time.perf_counter() - t_start_0
             active_processes.append((sd, lambda_val, p))
             peak_rss[p.pid] = 0.0
-            t_str = datetime.datetime.now().strftime('%H:%M:%S')
-            print(f"{t_str:<8} | {sd:<4} | {lambda_val:<6.2f} | {p.pid:<6} | {'STARTED':<10} | {f'{t_start_elapsed:.3f}s':<10} | RUNNING", flush=True)
 
         time.sleep(5)
 
@@ -2367,15 +2422,6 @@ if __name__ == '__main__':
                     pass
             else:
                 p.join()
-                t_str = datetime.datetime.now().strftime('%H:%M:%S')
-                p_rss = peak_rss.get(p.pid, 0.0)
-                print(f"{t_str:<8} | {sd:<4} | {lambda_val:<6.2f} | {p.pid:<6} | {'FINISHED':<10} | {f'{p_rss:.1f} MB':<10} | {p.exitcode:<9}", flush=True)
-                log_file = f"/tmp/crash_seed_{sd}_lambda_{lambda_val}.log"
-                if os.path.exists(log_file) and os.path.getsize(log_file) > 0:
-                    print(f"--- LOG OUTPUT FOR CRASHED SEED {sd} LAMBDA {lambda_val} ---", flush=True)
-                    with open(log_file, "r") as lf:
-                        print(lf.read(), flush=True)
-                    print("-" * 80, flush=True)
         active_processes = still_active
 
     ablation_raw_results = {}
@@ -2407,44 +2453,26 @@ if __name__ == '__main__':
     agents = {}
     train_logs = {}
 
-    print("\n" + "=" * 160, flush=True)
-    print("TRAINING LOGS FOR THE OPTIMAL LAMBDA PER SEED", flush=True)
-    print("=" * 160, flush=True)
-    print("Seed | Step     | EV     | Val-EV  | Val-Var | SRank | Loss   | OOS-Loss | Entropy | MDD%  | PnL_Train | Grad    | KL     | Clip  | Churn | BndV%   | AdvStd | RewValRatio | Churn_P", flush=True)
-    print("-" * 160, flush=True)
-
     for sd in SEED_SET:
         opt_l = optimal_lambdas[sd]
         res_list = ablation_raw_results[opt_l]
         res = next((r for r in res_list if r["seed"] == sd), None)
         if res is not None:
-            env_train_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_train, turnover_penalty_lambda=opt_l, decision_interval=96), ep_len=5000))
+            env_train_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_train, turnover_penalty_lambda=opt_l, decision_interval=16), ep_len=5000))
             ag = make_agent(env_train_local, sd, n_steps=n_steps, batch_size=batch_size)
             ag.policy.load_state_dict(res["policy_state_dict"])
             agents[sd] = ag
             train_logs[sd] = (res["ev_lines"], res["beh_rows"])
-            for line in res["ev_lines"]:
-                print(f"{sd:<4d} | {line}", flush=True)
             print_behavior_table(res["beh_rows"])
-            
-            first_trade_step = None
-            for row in res["beh_rows"]:
-                if row["trades_1k"] > 0:
-                    first_trade_step = row["step"]
-                    break
-            print(f"    Seed {sd} - First Trade Step: {first_trade_step if first_trade_step is not None else 'N/A'}", flush=True)
-            
-            if res.get("anomalies"):
-                print(f"    Seed {sd} - Validation Anomalies Detected: {res['anomalies']}", flush=True)
 
-    print(f"[TIME] Overall Agent Training & Parallel Evaluation completed in {time.perf_counter() - train_start:.4f} seconds", flush=True)
+    execution_timing_ledger.append(["Parallel Multi-Seed Training", f"{time.perf_counter() - train_start:.4f}"])
 
-    env_train_wrapped = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_train, turnover_penalty_lambda=0.0, decision_interval=96), ep_len=5000))
+    env_train_wrapped = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_train, turnover_penalty_lambda=0.0, decision_interval=16), ep_len=5000))
     _probe = make_agent(env_train_wrapped, 42)
     untrained_runs = []
     for sd in SEED_SET:
         untrained_runs.append(rollout(env_val_holdout, lambda o, e: _probe.predict(o, deterministic=True)[0], seed=sd))
-    agg_untrained = summarize("agent:untrained", untrained_runs)
+    agg_untrained, row_untrained = summarize("agent:untrained", untrained_runs)
     del _probe
 
     early_pnls = []
@@ -2458,29 +2486,19 @@ if __name__ == '__main__':
     t_stat_learn, p_val_learn = stats.ttest_ind(early_pnls, late_pnls, equal_var=False) if len(early_pnls) >= 3 else (0.0, 1.0)
     mean_learning_improved = bool(np.mean(late_pnls) > np.mean(early_pnls) and p_val_learn < 0.05)
 
-    print("\n" + "=" * 80, flush=True)
-    print("[M-LEARNING-DIAGNOSTIC] POLICY OPTIMIZATION INSIDE TRAINING SET", flush=True)
-    print("=" * 80, flush=True)
-    if early_pnls:
-        print(f"  Early Training PnLs (Val Probe Mean): {np.mean(early_pnls):.2f}", flush=True)
-    else:
-        print("  No early samples", flush=True)
-    if late_pnls:
-        print(f"  Late Training PnLs (Val Probe Mean): {np.mean(late_pnls):.2f}", flush=True)
-    else:
-        print("  No late samples", flush=True)
-    print(f"  t-statistic: {t_stat_learn:.4f}, p-value: {p_val_learn:.4e}", flush=True)
-    print(f"  Did policy show statistically significant improvement? {mean_learning_improved}", flush=True)
-    print("=" * 80, flush=True)
-
-    print("\n" + "=" * 125, flush=True)
-    print(f"{'Walk-Forward Analysis (WFA) & Out-of-Sample (OOS) Slice Benchmarking vs Slice Nulls':^125}", flush=True)
-    print("=" * 125, flush=True)
-    print(f"{'Val Slice / Period':<20} | {'Agent PnL (Mean±Std)':<22} | {'Best Null PnL':<13} | {'P(Ag>Null)':<10} | {'t-stat':<10} | {'-log10(p)':<10} | {'Eff z':<8} | {'Optimal Lambda':<14} | {'Branch Switches':<15}", flush=True)
-    print("-" * 125, flush=True)
+    print("\nPOLICY OPTIMIZATION INSIDE TRAINING SET:")
+    learn_diag_rows = [
+        ["Early Training PnL Mean", f"{np.mean(early_pnls):.2f}" if early_pnls else "N/A"],
+        ["Late Training PnL Mean", f"{np.mean(late_pnls):.2f}" if late_pnls else "N/A"],
+        ["t-statistic", f"{t_stat_learn:.4f}"],
+        ["p-value", f"{p_val_learn:.4e}"],
+        ["Statistically Improved?", "YES" if mean_learning_improved else "NO"]
+    ]
+    print_table(["Metric", "Value"], learn_diag_rows)
 
     wfa_start = time.perf_counter()
 
+    wfa_rows = []
     slice_z_scores = []
     for period_key, s_env in [
         ("Slice 1 (Early)", env_val_1_setup),
@@ -2490,12 +2508,12 @@ if __name__ == '__main__':
         agent_pnls_slice = []
         best_null_pnls = []
         branch_switches_list = []
-        for idx, sd in enumerate(SEED_SET):
-            esd = EVAL_SEEDS[idx]
+        for idx_s, sd in enumerate(SEED_SET):
+            esd = EVAL_SEEDS[idx_s]
             opt_l = optimal_lambdas[sd]
             res_list = ablation_raw_results[opt_l]
             matching_res = next((r for r in res_list if r["seed"] == sd), None)
-            eval_env_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, turnover_penalty_lambda=opt_l, is_eval=True, decision_interval=96), ep_len=val_holdout_ep_len))
+            eval_env_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, turnover_penalty_lambda=opt_l, is_eval=True, decision_interval=16), ep_len=val_holdout_ep_len))
             ag_local = make_agent(eval_env_local, sd, n_steps=n_steps, batch_size=batch_size)
             ag_local.policy.load_state_dict(matching_res["policy_state_dict"])
 
@@ -2503,9 +2521,9 @@ if __name__ == '__main__':
             agent_pnls_slice.append(ag_res["final_eq"] - 10000.0)
             branch_switches_list.append(ag_res.get("reward_branch_switches", 0.0))
 
-            trend_res = rollout(s_env, lambda o, e: trend_policy(e), esd)
+            bm_res = rollout(s_env, lambda o, e: full_benchmark_policy(e), esd)
             vol_res = rollout(s_env, lambda o, e: vol_target_policy(e), esd)
-            best_null_pnl = max(trend_res["final_eq"] - 10000.0, vol_res["final_eq"] - 10000.0)
+            best_null_pnl = max(bm_res["final_eq"] - 10000.0, vol_res["final_eq"] - 10000.0)
             best_null_pnls.append(best_null_pnl)
 
         slice_len_period = len(tp_val_1) if "Slice" in period_key else len(tp_val_holdout)
@@ -2528,8 +2546,8 @@ if __name__ == '__main__':
         prob_str = f"{prob_out:.1%}"
 
         if math.isnan(t_stat_slice):
-            t_str = "INSUFFICIENT"
-            p_str = "SAMPLES"
+            t_str = "N/A"
+            p_str = "N/A"
             z_str = "N/A"
         else:
             t_str = f"{t_stat_slice:>+10.3f}"
@@ -2537,13 +2555,26 @@ if __name__ == '__main__':
             z_str = f"{z_slice:>+10.2f}"
             if "Slice" in period_key:
                 slice_z_scores.append(z_slice)
-        null_str = f"{np.mean(best_null_pnls):>+10.2f}"
+
         opt_l_mean = np.mean([optimal_lambdas[sd] for sd in SEED_SET])
         avg_branch_switches = np.mean(branch_switches_list)
 
-        print(f"{period_key:<20} | {np.mean(agent_pnls_slice):>+9.2f} ± {safe_std(agent_pnls_slice):<8.2f} | {null_str:<13} | {prob_str:<10} | {t_str:<10} | {p_str:<10} | {z_slice:>+8.2f} | {opt_l_mean:<14.3f} | {avg_branch_switches:<15.1f}", flush=True)
-    print("=" * 125, flush=True)
-    print(f"[TIME] WFA & OOS Benchmarking analysis completed in {time.perf_counter() - wfa_start:.4f} seconds", flush=True)
+        wfa_rows.append([
+            period_key,
+            f"{np.mean(agent_pnls_slice):>+9.2f} ± {safe_std(agent_pnls_slice):.2f}",
+            f"{np.mean(best_null_pnls):>+10.2f}",
+            prob_str,
+            t_str,
+            p_str,
+            f"{z_slice:>+8.2f}",
+            f"{opt_l_mean:.3f}",
+            f"{avg_branch_switches:.1f}"
+        ])
+
+    print("\nWALK-FORWARD ANALYSIS (WFA) & OUT-OF-SAMPLE BENCHMARKING:")
+    print_table(["Val Period", "Agent PnL Mean±Std", "Best Null PnL", "P(Ag>Null)", "t-stat", "-log10(p)", "Eff z", "Opt Lambda", "Branch Switches"], wfa_rows)
+
+    execution_timing_ledger.append(["WFA & OOS Benchmarking", f"{time.perf_counter() - wfa_start:.4f}"])
 
     agent_runs = []
     for idx, sd in enumerate(SEED_SET):
@@ -2551,13 +2582,16 @@ if __name__ == '__main__':
         opt_l = optimal_lambdas[sd]
         res_list = ablation_raw_results[opt_l]
         matching_res = next((r for r in res_list if r["seed"] == sd), None)
-        eval_env_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, turnover_penalty_lambda=opt_l, is_eval=True, decision_interval=96), ep_len=val_holdout_ep_len))
+        eval_env_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, turnover_penalty_lambda=opt_l, is_eval=True, decision_interval=16), ep_len=val_holdout_ep_len))
         ag_local = make_agent(eval_env_local, sd, n_steps=n_steps, batch_size=batch_size)
         ag_local.policy.load_state_dict(matching_res["policy_state_dict"])
         run_res = rollout(env_val_holdout, lambda o, e, a=ag_local: a.predict(o, deterministic=True)[0], esd)
         agent_runs.append(run_res)
 
-    agg_ag = summarize("agent:trained", agent_runs)
+    agg_ag, row_trained = summarize("agent:trained", agent_runs)
+
+    print("\nTRAINED AGENT EVALUATION SUMMARY:")
+    print_table(["Policy", "Eq", "Sortino", "Skew", "Kurt", "CVaR95", "PF", "WR%"], [row_trained, row_untrained])
 
     run_distribution_shift_diagnostic(agents[SEED_SET[0]])
 
@@ -2577,30 +2611,22 @@ if __name__ == '__main__':
     pbo_val = compute_cscv_pbo(all_oos_returns)
     dsr_prob, best_sr, sr_star = compute_dsr(all_oos_returns, best_seed_idx)
 
-    print("\n" + "=" * 80, flush=True)
-    print("[DIAGNOSTIC-F] QUANT STATISTICS FOR BACKTEST OVERFITTING & SELECTION BIAS", flush=True)
-    print("=" * 80, flush=True)
-    if max(srs_oos) <= 0.0:
-        print("  Probability of Backtest Overfitting (PBO via CPCV): N/A (no positive-SR candidate — metric undefined for uniformly losing set)", flush=True)
-    else:
-        print(f"  Probability of Backtest Overfitting (PBO via CPCV): {pbo_val:.1%}", flush=True)
-    print(f"  Best Trial (Seed {best_seed}) Observed Sharpe Ratio (unannualized): {best_sr:.4f}", flush=True)
-    print(f"  Expected Maximum Sharpe Ratio under Null (N={len(SEED_SET) * len(LAMBDA_CONFIGS)}): {sr_star:.4f}", flush=True)
-    print(f"  Deflated Sharpe Ratio (DSR Probability): {dsr_prob:.2%}", flush=True)
-    if dsr_prob >= 0.95:
-        print("  VERDICT ON SELECTION BIAS: PASS (DSR probability >= 95% indicates genuine skill)", flush=True)
-    else:
-        print("  VERDICT ON SELECTION BIAS: FAIL (DSR probability < 95% indicates performance is a multiple-testing fluke)", flush=True)
-    print("=" * 80, flush=True)
+    print("\nBACKTEST OVERFITTING & SELECTION BIAS DIAGNOSTIC:")
+    pbo_str = "N/A (Loss Set)" if max(srs_oos) <= 0.0 else f"{pbo_val:.1%}"
+    dsr_verdict = "PASS" if dsr_prob >= 0.95 else "FAIL"
+    quant_rows = [
+        ["PBO via CPCV", pbo_str],
+        ["Best Trial SR (unann)", f"{best_sr:.4f}"],
+        ["Exp Max SR Null (N=24)", f"{sr_star:.4f}"],
+        ["Deflated Sharpe Prob (DSR)", f"{dsr_prob:.2%}"],
+        ["Selection Bias Verdict", dsr_verdict]
+    ]
+    print_table(["Metric", "Value"], quant_rows)
 
-    print("\n" + "=" * 80, flush=True)
-    print("[DIAGNOSTIC-G] TURNOVER PENALTY ABLATION STUDY (CAUSAL VERIFICATION)", flush=True)
-    print("=" * 80, flush=True)
-    print(f"{'Penalty Lambda':<25} | {'Mean Magnitude':<20} | {'OOS Sortino (Mean)':<15} | {'OOS Equity (Mean)':<15}", flush=True)
-    print("-" * 80, flush=True)
-
+    print("\nTURNOVER PENALTY ABLATION STUDY:")
+    ablation_summary_rows = []
     for l_val in LAMBDA_CONFIGS:
-        l_env = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, turnover_penalty_lambda=l_val, is_eval=True, decision_interval=96), ep_len=val_holdout_ep_len))
+        l_env = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, turnover_penalty_lambda=l_val, is_eval=True, decision_interval=16), ep_len=val_holdout_ep_len))
         mags = []
         sortinos = []
         eqs_oos = []
@@ -2609,7 +2635,7 @@ if __name__ == '__main__':
             res_list = ablation_raw_results[l_val]
             matching_res = next((r for r in res_list if r["seed"] == sd), None)
             if matching_res is not None:
-                eval_env_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, turnover_penalty_lambda=l_val, is_eval=True, decision_interval=96), ep_len=val_holdout_ep_len))
+                eval_env_local = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, turnover_penalty_lambda=l_val, is_eval=True, decision_interval=16), ep_len=val_holdout_ep_len))
                 ag_local = make_agent(eval_env_local, sd, n_steps=n_steps, batch_size=batch_size)
                 ag_local.policy.load_state_dict(matching_res["policy_state_dict"])
                 eval_res = rollout(eval_env_local, lambda o, e, a=ag_local: a.predict(o, deterministic=True)[0], esd)
@@ -2620,27 +2646,22 @@ if __name__ == '__main__':
         m_mag = np.mean(mags) if mags else 0.0
         m_sort = np.mean(sortinos) if sortinos else 0.0
         m_eq = np.mean(eqs_oos) if eqs_oos else 10000.0
-        print(f"{l_val:<25.2f} | {m_mag:<20.4f} | {m_sort:<15.2f} | {m_eq:<15.2f}", flush=True)
-    print("=" * 80, flush=True)
+        ablation_summary_rows.append([f"{l_val:.2f}", f"{m_mag:.4f}", f"{m_sort:.2f}", f"{m_eq:.2f}"])
+    print_table(["Penalty Lambda", "Mean Mag", "OOS Sortino", "OOS Equity"], ablation_summary_rows)
 
     reward_decomposition_diagnostic(env_val_holdout, agents[SEED_SET[0]], SEED_SET[0])
     action_saturation_diagnostic(env_val_holdout, agents[SEED_SET[0]], SEED_SET[0])
-
-    print("\n" + "=" * 120, flush=True)
-    print("COST SENSITIVITY STRESS TEST & PNL RECONCILIATION AUDIT", flush=True)
-    print("=" * 120, flush=True)
-    print(f"{'Multiplier':<10} | {'Seed':<5} | {'Net PnL':<10} | {'Reconciled':<10} | {'Residual':<9} | {'Gross Realized':<14} | {'Gross Unrealized':<16} | {'Swaps':<9} | {'Fees':<8}", flush=True)
-    print("-" * 120, flush=True)
 
     stress_start = time.perf_counter()
     cost_multipliers = [1.0, 1.5, 2.0]
     overlap_factor_full = max(1.0, (val_holdout_ep_len * len(EVAL_SEEDS)) / (len(tp_val_holdout) + 1e-9))
 
+    stress_rows = []
     eq_diffs = []
     for cm in cost_multipliers:
         if cm == 1.0:
             agent_cost_runs = agent_runs
-            trend_cost_runs = NULL_EVAL_CACHE["Full Holdout"]["trend_results"]
+            bm_cost_runs = NULL_EVAL_CACHE["Full Holdout"]["trend_results"]
             vol_cost_runs = NULL_EVAL_CACHE["Full Holdout"]["vol_results"]
             agg_ac = agg_ag
         else:
@@ -2648,7 +2669,7 @@ if __name__ == '__main__':
             for idx, sd in enumerate(SEED_SET):
                 esd = EVAL_SEEDS[idx]
                 opt_l = optimal_lambdas[sd]
-                env_val_cost = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, cost_multiplier=cm, turnover_penalty_lambda=opt_l, is_eval=True, decision_interval=96), ep_len=val_holdout_ep_len))
+                env_val_cost = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, cost_multiplier=cm, turnover_penalty_lambda=opt_l, is_eval=True, decision_interval=16), ep_len=val_holdout_ep_len))
                 res_list = ablation_raw_results[opt_l]
                 matching_res = next((r for r in res_list if r["seed"] == sd), None)
                 ag_local = make_agent(env_val_cost, sd, n_steps=n_steps, batch_size=batch_size)
@@ -2656,15 +2677,15 @@ if __name__ == '__main__':
                 run_res = rollout(env_val_cost, lambda o, e, a=ag_local: a.predict(o, deterministic=True)[0], esd)
                 agent_cost_runs.append(run_res)
 
-            trend_cost_runs = []
+            bm_cost_runs = []
             vol_cost_runs = []
             for idx, sd in enumerate(SEED_SET):
                 esd = EVAL_SEEDS[idx]
                 opt_l = optimal_lambdas[sd]
-                env_val_cost = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, cost_multiplier=cm, turnover_penalty_lambda=opt_l, is_eval=True, decision_interval=96), ep_len=val_holdout_ep_len))
-                trend_res = rollout(env_val_cost, lambda o, e: trend_policy(e), esd)
+                env_val_cost = BootstrapFix(SubEpisodeEnv(TargetWeightEnv(get_fresh_sim(sim), symbols, WINDOW, tp_val_holdout, cost_multiplier=cm, turnover_penalty_lambda=opt_l, is_eval=True, decision_interval=16), ep_len=val_holdout_ep_len))
+                bm_res = rollout(env_val_cost, lambda o, e: full_benchmark_policy(e), esd)
                 vol_res = rollout(env_val_cost, lambda o, e: vol_target_policy(e), esd)
-                trend_cost_runs.append(trend_res)
+                bm_cost_runs.append(bm_res)
                 vol_cost_runs.append(vol_res)
 
         for idx, sd in enumerate(SEED_SET):
@@ -2676,58 +2697,56 @@ if __name__ == '__main__':
             r_gross_unrel = run_res["gross_raw_unrealized"]
             r_swaps = run_res.get("accumulated_swaps", 0.0)
             r_fees = run_res.get("accumulated_fees", 0.0)
-            print(f"{cm:<10.1f} | {sd:<5d} | {r_net:>+10.2f} | {r_rec:>+10.2f} | {r_res:>+9.2e} | {r_gross_rel:>+14.2f} | {r_gross_unrel:>+16.2f} | {r_swaps:>+9.2f} | {r_fees:>+8.2f}", flush=True)
+            stress_rows.append([f"{cm:.1f}", str(sd), f"{r_net:>+10.2f}", f"{r_rec:>+10.2f}", f"{r_res:>+9.2e}", f"{r_gross_rel:>+14.2f}", f"{r_gross_unrel:>+16.2f}", f"{r_swaps:>+9.2f}", f"{r_fees:>+8.2f}"])
 
         agent_cost_eqs = [r["final_eq"] for r in agent_cost_runs]
-        trend_cost_eqs = [r["final_eq"] for r in trend_cost_runs]
+        bm_cost_eqs = [r["final_eq"] for r in bm_cost_runs]
         vol_cost_eqs = [r["final_eq"] for r in vol_cost_runs]
 
-        best_null_cost_eqs = trend_cost_eqs if np.mean(trend_cost_eqs) > np.mean(vol_cost_eqs) else vol_cost_eqs
+        best_null_cost_eqs = bm_cost_eqs if np.mean(bm_cost_eqs) > np.mean(vol_cost_eqs) else vol_cost_eqs
         t_stat_cost, neg_log10_p_cost, z_cost = corrected_welch_ttest(agent_cost_eqs, best_null_cost_eqs, overlap_factor_full)
 
         if cm > 1.0:
             pct_diff = abs(np.mean(agent_cost_eqs) - np.mean([r["final_eq"] for r in agent_runs])) / 10000.0 * 100.0
             eq_diffs.append(pct_diff)
 
-    print("-" * 120, flush=True)
-    if eq_diffs and all(d < 0.1 for d in eq_diffs):
-        print("  Cost sensitivity stress test result: Insensitive to cost multiplier (delta equity < 0.1%).", flush=True)
-    print(f"[TIME] Cost Sensitivity Stress Test completed in {time.perf_counter() - stress_start:.4f} seconds", flush=True)
+    print("\nCOST SENSITIVITY STRESS TEST & PNL RECONCILIATION AUDIT:")
+    print_table(["Cost Mult", "Seed", "Net PnL", "Reconciled", "Residual", "Gross Realized", "Gross Unrealized", "Swaps", "Fees"], stress_rows)
 
-    print("\n" + "=" * 80, flush=True)
-    print("[M-PER-SYMBOL] STANDALONE PER-SYMBOL CLOSED PNL DECOMPOSITION", flush=True)
+    execution_timing_ledger.append(["Cost Sensitivity Stress Test", f"{time.perf_counter() - stress_start:.4f}"])
+
     decomp_start = time.perf_counter()
     symbol_breakdown = defaultdict(list)
     for r in agent_runs:
         for s_sym, pnl_val in r.get("symbol_closed_pnl", {}).items():
             symbol_breakdown[s_sym].append(pnl_val)
 
+    decomp_rows = []
     for s_sym in symbols:
         p_vals = symbol_breakdown.get(s_sym, [0.0])
-        print(f"  symbol {s_sym:8s}: closed_pnl_mean={np.mean(p_vals):+9.2f} ± {safe_std(p_vals):6.2f}", flush=True)
-    print(f"[TIME] Per-Symbol PnL Decomposition completed in {time.perf_counter() - decomp_start:.4f} seconds", flush=True)
+        decomp_rows.append([s_sym, f"{np.mean(p_vals):+9.2f}", f"{safe_std(p_vals):.2f}"])
 
-    print("\n" + "=" * 80, flush=True)
-    print("[M-POWER] STATISTICAL POWER ANALYSIS", flush=True)
+    print("\nPER-SYMBOL CLOSED PNL DECOMPOSITION:")
+    print_table(["Symbol", "Closed PnL Mean", "Std"], decomp_rows)
+
+    execution_timing_ledger.append(["Per-Symbol PnL Decomposition", f"{time.perf_counter() - decomp_start:.4f}"])
+
     power_start = time.perf_counter()
-
     agent_full_pnls = [r["final_eq"] - 10000.0 for r in agent_runs]
     cached_oos_full = NULL_EVAL_CACHE.get("Full Holdout", {})
     best_null_full_pnls = cached_oos_full.get("best_null_pnls")
 
     req_seeds, calculated_d = compute_required_seeds(agent_full_pnls, best_null_full_pnls, alpha=0.05, power=0.80)
-    print(f"  Observed Cohen's d: {calculated_d:.4f}", flush=True)
-    print(f"  Required Seeds for 80% statistical power (alpha=0.05): {req_seeds}", flush=True)
-    if req_seeds == float('inf'):
-        print("  WARNING: Effect size is too small; statistical power is uncomputable or demands an infinite cohort.", flush=True)
-    elif req_seeds > 100:
-        print(f"  WARNING: Variance is high relative to effect size. Running {req_seeds} seeds is computationally impractical.", flush=True)
-        print("  RECOMMENDATION: Restructure model representations or reduce environment noise to shrink variance.", flush=True)
-    else:
-        print(f"  STATUS: Cohort size of {req_seeds} is statistically sufficient and computationally feasible.", flush=True)
-    print(f"[TIME] Statistical Power Analysis completed in {time.perf_counter() - power_start:.4f} seconds", flush=True)
+    power_rows = [
+        ["Observed Cohen's d", f"{calculated_d:.4f}"],
+        ["Required Seeds (80% power)", str(req_seeds)]
+    ]
+    print("\nSTATISTICAL POWER ANALYSIS:")
+    print_table(["Metric", "Value"], power_rows)
 
-    n_trials = 5
+    execution_timing_ledger.append(["Statistical Power Analysis", f"{time.perf_counter() - power_start:.4f}"])
+
+    n_trials = len(SEED_SET) * len(LAMBDA_CONFIGS)
     z_req = 2.0 + math.sqrt(2 * math.log(max(n_trials, 1)))
     is_degenerate = (agg_ag["trades_per_1k"][0] < 1.0) or (agg_ag["pct_in_market"][0] < 10.0)
 
@@ -2735,17 +2754,15 @@ if __name__ == '__main__':
         verdict = "BAD (degenerate)"
         z_vs_best_null_eq = 0.0
         margin_vs_carry_eq = 0.0
-        z_vs_best_null_sortino = 0.0
-        margin_vs_carry_sortino = 0.0
     else:
         a_eq_samples = [r["final_eq"] for r in agent_runs]
         a_pnl_samples = [eq - 10000.0 for eq in a_eq_samples]
 
         null_runs_paired = []
         for esd in EVAL_SEEDS:
-            trend_res = rollout(env_val_holdout, lambda o, e: trend_policy(e), esd)
+            bm_res = rollout(env_val_holdout, lambda o, e: full_benchmark_policy(e), esd)
             vol_res = rollout(env_val_holdout, lambda o, e: vol_target_policy(e), esd)
-            best_null_pnl = max(trend_res["final_eq"] - 10000.0, vol_res["final_eq"] - 10000.0)
+            best_null_pnl = max(bm_res["final_eq"] - 10000.0, vol_res["final_eq"] - 10000.0)
             null_runs_paired.append(best_null_pnl)
 
         diffs = np.array(a_pnl_samples) - np.array(null_runs_paired)
@@ -2763,20 +2780,14 @@ if __name__ == '__main__':
 
         margin_vs_carry_eq = float(np.mean(a_pnl_samples) / (safe_std(a_pnl_samples) + 1e-12))
 
-        t_stat_sort = 0.0
-        neg_log10_p_sort = 0.0
-        z_vs_best_null_sortino = 0.0
-        margin_vs_carry_sortino = 0.0
-
         passed_eq = (z_vs_best_null_eq >= z_req and margin_vs_carry_eq > 2.0)
-        passed_sortino = True
 
         slices_positive = len(slice_z_scores) > 0 and all(z >= 0.0 for z in slice_z_scores)
         slices_statistically_strong = len(slice_z_scores) > 0 and all(z >= 1.96 for z in slice_z_scores)
 
         if z_vs_best_null_eq < 0.0 or any(z < 0.0 for z in slice_z_scores):
             verdict = "BAD"
-        elif passed_eq and passed_sortino and slices_statistically_strong:
+        elif passed_eq and slices_statistically_strong:
             verdict = "CONFIRMED"
         elif z_vs_best_null_eq >= 2.0 and slices_positive:
             verdict = "LIKELY"
@@ -2785,14 +2796,17 @@ if __name__ == '__main__':
         else:
             verdict = "BAD"
 
-    if math.isnan(t_stat_eq):
-        print("\n  welch_t_eq=INSUFFICIENT SAMPLES", flush=True)
-    else:
-        print(f"\\n  paired_t_eq={t_stat_eq:.3f} (-log10_p_eq={neg_log10_p_eq:.4f}) | effective_z_eq={z_vs_best_null_eq:.2f} | (agent-carry_eq)/std={margin_vs_carry_eq:.2f}", flush=True)
-    print(f"  z_required(deflated, {n_trials} trials)={z_req:.2f}", flush=True)
-    print(f"  VERDICT: {verdict}", flush=True)
+    print("\nFINAL SYSTEM EVALUATION VERDICT:")
+    verdict_rows = [
+        ["Paired t-stat (Equity)", f"{t_stat_eq:.3f}" if not math.isnan(t_stat_eq) else "N/A"],
+        ["Effective z-score", f"{z_vs_best_null_eq:.2f}"],
+        ["Margin vs Carry Ratio", f"{margin_vs_carry_eq:.2f}"],
+        ["Required Deflated z-score", f"{z_req:.2f}"],
+        ["FINAL SYSTEM VERDICT", verdict]
+    ]
+    print_table(["Evaluation Metric", "Result / Status"], verdict_rows)
 
-    if pbo_val < 0.05 and (best_sr < 0.0 or z_vs_best_null_eq < 0.0):
-        print("\n  [WARNING] Diagnostic Contradiction: PBO is extremely low (<5%) but OOS z-score/Sharpe is negative. This indicates a diagnostic failure or structural misalignment in the validation protocol, NOT strategy viability.", flush=True)
+    execution_timing_ledger.append(["Total Execution Time", f"{time.perf_counter() - global_start_time:.4f}"])
 
-    print(f"\n[TIME] Total execution completed in {time.perf_counter() - global_start_time:.4f} seconds", flush=True)
+    print("\nCONSOLIDATED EXECUTION TIMING LEDGER:")
+    print_table(["Diagnostic Module / Stage", "Execution Time (s)"], execution_timing_ledger)
