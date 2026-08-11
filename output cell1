@@ -79,7 +79,7 @@ FFD OPTIMAL PARAMETER (d_opt) DIAGNOSTIC TABLE:
 +--------+----------------+--------------+----------------+
 | Asset  | Selected d_opt | Valid N (Tr) | ADF Score (Tr) |
 +--------+----------------+--------------+----------------+
-| XAUUSD | 0.50           | 46725        | -4.2317        |
+| XAUUSD | 0.60           | 46785        | -3.6222        |
 | XAGUSD | 0.30           | 46537        | -3.5999        |
 | US500  | 0.30           | 46537        | -3.6641        |
 | XTIUSD | 0.10           | 46422        | -3.6756        |
@@ -87,55 +87,111 @@ FFD OPTIMAL PARAMETER (d_opt) DIAGNOSTIC TABLE:
 | BTCUSD | 0.30           | 46537        | -3.0385        |
 +--------+----------------+--------------+----------------+
 
-Feature bank v3: 32 candidates
+Feature bank v3: 86 candidates
 
 G3 STATIONARITY BREAKDOWN DIAGNOSTIC (ADF FAILURES BY SUFFIX):
-+--------------+--------+-------+-----------+
-| Suffix       | Failed | Total | Fail Rate |
-+--------------+--------+-------+-----------+
-| cumret_20d   | 0      | 6     | 0.0%      |
-| breakout_20d | 0      | 6     | 0.0%      |
-| vol_level    | 0      | 6     | 0.0%      |
-| kc_dist20    | 0      | 6     | 0.0%      |
-| kc_dist96    | 0      | 6     | 0.0%      |
-+--------------+--------+-------+-----------+
++---------------+--------+-------+-----------+
+| Suffix        | Failed | Total | Fail Rate |
++---------------+--------+-------+-----------+
+| cumret_20d    | 0      | 6     | 0.0%      |
+| breakout_20d  | 0      | 6     | 0.0%      |
+| vol_level     | 0      | 6     | 0.0%      |
+| kc_dist20     | 0      | 6     | 0.0%      |
+| kc_dist96     | 0      | 6     | 0.0%      |
+| har_rv1       | 0      | 6     | 0.0%      |
+| har_rv5       | 0      | 6     | 0.0%      |
+| har_rv22      | 5      | 6     | 83.3%     |
+| rs_neg        | 0      | 6     | 0.0%      |
+| signed_jump   | 0      | 6     | 0.0%      |
+| yz_vol        | 0      | 6     | 0.0%      |
+| overnight_vol | 0      | 6     | 0.0%      |
+| intraday_mom  | 0      | 6     | 0.0%      |
+| cross_rv      | 0      | 6     | 0.0%      |
++---------------+--------+-------+-----------+
 
 G5 COVARIATE SHIFT (DRIFT) DIAGNOSTIC (TRAIN VS EMBARGO VALIDATION):
-+---------------------+--------+-----------------------------+
-| Feature Name        | PSI    | Status                      |
-+---------------------+--------+-----------------------------+
-| XAUUSD_cumret_20d   | 0.1176 | STABLE (TRAIN vs VAL)       |
-| XAUUSD_vol_level    | 0.0449 | STABLE (TRAIN vs VAL)       |
-| XAUUSD_breakout_20d | 0.2892 | DRIFT REJECT (TRAIN vs VAL) |
-| XAUUSD_kc_dist20    | 0.0023 | STABLE (TRAIN vs VAL)       |
-| XAUUSD_kc_dist96    | 0.0097 | STABLE (TRAIN vs VAL)       |
-| XAGUSD_cumret_20d   | 0.0998 | STABLE (TRAIN vs VAL)       |
-| XAGUSD_vol_level    | 0.0384 | STABLE (TRAIN vs VAL)       |
-| XAGUSD_breakout_20d | 0.3084 | DRIFT REJECT (TRAIN vs VAL) |
-| XAGUSD_kc_dist20    | 0.0044 | STABLE (TRAIN vs VAL)       |
-| XAGUSD_kc_dist96    | 0.0074 | STABLE (TRAIN vs VAL)       |
-| US500_cumret_20d    | 0.0526 | STABLE (TRAIN vs VAL)       |
-| US500_vol_level     | 0.0123 | STABLE (TRAIN vs VAL)       |
-| US500_breakout_20d  | 0.1504 | STABLE (TRAIN vs VAL)       |
-| US500_kc_dist20     | 0.0021 | STABLE (TRAIN vs VAL)       |
-| US500_kc_dist96     | 0.0118 | STABLE (TRAIN vs VAL)       |
-| XTIUSD_cumret_20d   | 0.0801 | STABLE (TRAIN vs VAL)       |
-| XTIUSD_vol_level    | 0.0131 | STABLE (TRAIN vs VAL)       |
-| XTIUSD_breakout_20d | 0.2955 | DRIFT REJECT (TRAIN vs VAL) |
-| XTIUSD_kc_dist20    | 0.0015 | STABLE (TRAIN vs VAL)       |
-| XTIUSD_kc_dist96    | 0.0106 | STABLE (TRAIN vs VAL)       |
-| USDJPY_cumret_20d   | 0.2406 | DRIFT REJECT (TRAIN vs VAL) |
-| USDJPY_vol_level    | 0.0216 | STABLE (TRAIN vs VAL)       |
-| USDJPY_breakout_20d | 0.3018 | DRIFT REJECT (TRAIN vs VAL) |
-| USDJPY_kc_dist20    | 0.0016 | STABLE (TRAIN vs VAL)       |
-| USDJPY_kc_dist96    | 0.0078 | STABLE (TRAIN vs VAL)       |
-| BTCUSD_cumret_20d   | 0.3155 | DRIFT REJECT (TRAIN vs VAL) |
-| BTCUSD_vol_level    | 0.0236 | STABLE (TRAIN vs VAL)       |
-| BTCUSD_breakout_20d | 0.4591 | DRIFT REJECT (TRAIN vs VAL) |
-| BTCUSD_kc_dist20    | 0.0008 | STABLE (TRAIN vs VAL)       |
-| BTCUSD_kc_dist96    | 0.0168 | STABLE (TRAIN vs VAL)       |
-+---------------------+--------+-----------------------------+
-G2-G5: {'G2': '32/32 alive', 'G3': '32/32 stationary', 'G5': '25/32 stable'}
++----------------------+--------+-----------------------------+
+| Feature Name         | PSI    | Status                      |
++----------------------+--------+-----------------------------+
+| XAUUSD_cumret_20d    | 0.0741 | STABLE (TRAIN vs VAL)       |
+| XAUUSD_vol_level     | 0.0449 | STABLE (TRAIN vs VAL)       |
+| XAUUSD_breakout_20d  | 0.2892 | DRIFT REJECT (TRAIN vs VAL) |
+| XAUUSD_kc_dist20     | 0.0023 | STABLE (TRAIN vs VAL)       |
+| XAUUSD_kc_dist96     | 0.0097 | STABLE (TRAIN vs VAL)       |
+| XAUUSD_har_rv1       | 0.0215 | STABLE (TRAIN vs VAL)       |
+| XAUUSD_har_rv5       | 0.0923 | STABLE (TRAIN vs VAL)       |
+| XAUUSD_har_rv22      | 0.5885 | DRIFT REJECT (TRAIN vs VAL) |
+| XAUUSD_rs_neg        | 0.0363 | STABLE (TRAIN vs VAL)       |
+| XAUUSD_signed_jump   | 0.7898 | DRIFT REJECT (TRAIN vs VAL) |
+| XAUUSD_yz_vol        | 0.0239 | STABLE (TRAIN vs VAL)       |
+| XAUUSD_overnight_vol | 0.2141 | DRIFT REJECT (TRAIN vs VAL) |
+| XAUUSD_intraday_mom  | 0.2926 | DRIFT REJECT (TRAIN vs VAL) |
+| XAGUSD_cumret_20d    | 0.0998 | STABLE (TRAIN vs VAL)       |
+| XAGUSD_vol_level     | 0.0384 | STABLE (TRAIN vs VAL)       |
+| XAGUSD_breakout_20d  | 0.3084 | DRIFT REJECT (TRAIN vs VAL) |
+| XAGUSD_kc_dist20     | 0.0044 | STABLE (TRAIN vs VAL)       |
+| XAGUSD_kc_dist96     | 0.0074 | STABLE (TRAIN vs VAL)       |
+| XAGUSD_har_rv1       | 0.0171 | STABLE (TRAIN vs VAL)       |
+| XAGUSD_har_rv5       | 0.1968 | STABLE (TRAIN vs VAL)       |
+| XAGUSD_rs_neg        | 0.0225 | STABLE (TRAIN vs VAL)       |
+| XAGUSD_signed_jump   | 0.9367 | DRIFT REJECT (TRAIN vs VAL) |
+| XAGUSD_yz_vol        | 0.0088 | STABLE (TRAIN vs VAL)       |
+| XAGUSD_overnight_vol | 0.3064 | DRIFT REJECT (TRAIN vs VAL) |
+| XAGUSD_intraday_mom  | 0.4464 | DRIFT REJECT (TRAIN vs VAL) |
+| XAGUSD_cross_rv      | 0.0140 | STABLE (TRAIN vs VAL)       |
+| US500_cumret_20d     | 0.0526 | STABLE (TRAIN vs VAL)       |
+| US500_vol_level      | 0.0123 | STABLE (TRAIN vs VAL)       |
+| US500_breakout_20d   | 0.1504 | STABLE (TRAIN vs VAL)       |
+| US500_kc_dist20      | 0.0021 | STABLE (TRAIN vs VAL)       |
+| US500_kc_dist96      | 0.0118 | STABLE (TRAIN vs VAL)       |
+| US500_har_rv1        | 0.0095 | STABLE (TRAIN vs VAL)       |
+| US500_har_rv5        | 0.0843 | STABLE (TRAIN vs VAL)       |
+| US500_rs_neg         | 0.0285 | STABLE (TRAIN vs VAL)       |
+| US500_signed_jump    | 0.0398 | STABLE (TRAIN vs VAL)       |
+| US500_yz_vol         | 0.0308 | STABLE (TRAIN vs VAL)       |
+| US500_overnight_vol  | 0.2420 | DRIFT REJECT (TRAIN vs VAL) |
+| US500_intraday_mom   | 0.0241 | STABLE (TRAIN vs VAL)       |
+| US500_cross_rv       | 0.0158 | STABLE (TRAIN vs VAL)       |
+| XTIUSD_cumret_20d    | 0.0801 | STABLE (TRAIN vs VAL)       |
+| XTIUSD_vol_level     | 0.0131 | STABLE (TRAIN vs VAL)       |
+| XTIUSD_breakout_20d  | 0.2955 | DRIFT REJECT (TRAIN vs VAL) |
+| XTIUSD_kc_dist20     | 0.0015 | STABLE (TRAIN vs VAL)       |
+| XTIUSD_kc_dist96     | 0.0106 | STABLE (TRAIN vs VAL)       |
+| XTIUSD_har_rv1       | 0.0297 | STABLE (TRAIN vs VAL)       |
+| XTIUSD_har_rv5       | 0.0806 | STABLE (TRAIN vs VAL)       |
+| XTIUSD_rs_neg        | 0.0582 | STABLE (TRAIN vs VAL)       |
+| XTIUSD_signed_jump   | 0.2914 | DRIFT REJECT (TRAIN vs VAL) |
+| XTIUSD_yz_vol        | 0.0273 | STABLE (TRAIN vs VAL)       |
+| XTIUSD_overnight_vol | 0.5610 | DRIFT REJECT (TRAIN vs VAL) |
+| XTIUSD_intraday_mom  | 0.1402 | STABLE (TRAIN vs VAL)       |
+| XTIUSD_cross_rv      | 0.0185 | STABLE (TRAIN vs VAL)       |
+| USDJPY_cumret_20d    | 0.2406 | DRIFT REJECT (TRAIN vs VAL) |
+| USDJPY_vol_level     | 0.0216 | STABLE (TRAIN vs VAL)       |
+| USDJPY_breakout_20d  | 0.3018 | DRIFT REJECT (TRAIN vs VAL) |
+| USDJPY_kc_dist20     | 0.0016 | STABLE (TRAIN vs VAL)       |
+| USDJPY_kc_dist96     | 0.0078 | STABLE (TRAIN vs VAL)       |
+| USDJPY_har_rv1       | 0.0268 | STABLE (TRAIN vs VAL)       |
+| USDJPY_har_rv5       | 0.0272 | STABLE (TRAIN vs VAL)       |
+| USDJPY_rs_neg        | 0.0149 | STABLE (TRAIN vs VAL)       |
+| USDJPY_signed_jump   | 0.2583 | DRIFT REJECT (TRAIN vs VAL) |
+| USDJPY_yz_vol        | 0.0337 | STABLE (TRAIN vs VAL)       |
+| USDJPY_overnight_vol | 0.0649 | STABLE (TRAIN vs VAL)       |
+| USDJPY_intraday_mom  | 0.1008 | STABLE (TRAIN vs VAL)       |
+| BTCUSD_cumret_20d    | 0.3155 | DRIFT REJECT (TRAIN vs VAL) |
+| BTCUSD_vol_level     | 0.0236 | STABLE (TRAIN vs VAL)       |
+| BTCUSD_breakout_20d  | 0.4591 | DRIFT REJECT (TRAIN vs VAL) |
+| BTCUSD_kc_dist20     | 0.0008 | STABLE (TRAIN vs VAL)       |
+| BTCUSD_kc_dist96     | 0.0168 | STABLE (TRAIN vs VAL)       |
+| BTCUSD_har_rv1       | 0.0684 | STABLE (TRAIN vs VAL)       |
+| BTCUSD_har_rv5       | 0.0658 | STABLE (TRAIN vs VAL)       |
+| BTCUSD_rs_neg        | 0.0126 | STABLE (TRAIN vs VAL)       |
+| BTCUSD_signed_jump   | 0.0261 | STABLE (TRAIN vs VAL)       |
+| BTCUSD_yz_vol        | 0.0735 | STABLE (TRAIN vs VAL)       |
+| BTCUSD_overnight_vol | 0.2648 | DRIFT REJECT (TRAIN vs VAL) |
+| BTCUSD_intraday_mom  | 0.0042 | STABLE (TRAIN vs VAL)       |
+| BTCUSD_cross_rv      | 0.0133 | STABLE (TRAIN vs VAL)       |
++----------------------+--------+-----------------------------+
+G2-G5: {'G2': '86/86 alive', 'G3': '81/86 stationary', 'G5': '60/79 stable'}
 
 1. EXECUTING PREMIUM, TIMING & SPA RECONCILIATION GATE
 
@@ -143,282 +199,317 @@ NEW ASSUMPTION 1: PREMIUM GATE (BENCHMARK RULE SHARPE AFTER FRICTION)
 +--------+---------+---------------------------+----------------+
 | Asset  | Horizon | Annualized Sharpe (Train) | Premium Status |
 +--------+---------+---------------------------+----------------+
-| BTCUSD | 1       | -5.2934                   | FAIL           |
-| BTCUSD | 4       | -1.6364                   | FAIL           |
-| BTCUSD | 16      | -0.1495                   | FAIL           |
-| BTCUSD | 96      | -0.3096                   | FAIL           |
-| US500  | 96      | -12.6438                  | FAIL           |
-| USDJPY | 1       | +0.0055                   | FAIL           |
-| USDJPY | 4       | +0.0039                   | FAIL           |
-| USDJPY | 16      | +0.0048                   | FAIL           |
-| USDJPY | 96      | -0.0020                   | FAIL           |
-| XAGUSD | 1       | -16.2944                  | FAIL           |
-| XAGUSD | 4       | -9.3081                   | FAIL           |
-| XAGUSD | 16      | -5.3053                   | FAIL           |
-| XAGUSD | 96      | -1.6967                   | FAIL           |
-| XAUUSD | 1       | -3.9991                   | FAIL           |
-| XAUUSD | 4       | -1.3583                   | FAIL           |
-| XAUUSD | 16      | -0.0629                   | FAIL           |
-| XAUUSD | 96      | +1.1938                   | PASS           |
-| XTIUSD | 4       | -28.2236                  | FAIL           |
-| XTIUSD | 16      | -15.8570                  | FAIL           |
-| XTIUSD | 96      | -4.8797                   | FAIL           |
+| BTCUSD | 1       | +0.5453                   | PASS           |
+| BTCUSD | 4       | +0.5453                   | PASS           |
+| BTCUSD | 16      | +0.5453                   | PASS           |
+| BTCUSD | 96      | +0.5453                   | PASS           |
+| US500  | 96      | -0.5801                   | FAIL           |
+| USDJPY | 1       | -1.0001                   | FAIL           |
+| USDJPY | 4       | -1.0001                   | FAIL           |
+| USDJPY | 16      | -1.0001                   | FAIL           |
+| USDJPY | 96      | -1.0001                   | FAIL           |
+| XAGUSD | 1       | -0.2561                   | FAIL           |
+| XAGUSD | 4       | -0.2561                   | FAIL           |
+| XAGUSD | 16      | -0.2561                   | FAIL           |
+| XAGUSD | 96      | -0.2561                   | FAIL           |
+| XAUUSD | 1       | +2.0711                   | PASS           |
+| XAUUSD | 4       | +2.0711                   | PASS           |
+| XAUUSD | 16      | +2.0711                   | PASS           |
+| XAUUSD | 96      | +2.0711                   | PASS           |
+| XTIUSD | 4       | -1.0215                   | FAIL           |
+| XTIUSD | 16      | -1.0215                   | FAIL           |
+| XTIUSD | 96      | -1.0215                   | FAIL           |
 +--------+---------+---------------------------+----------------+
 
 NEW ASSUMPTION 2: TIMING GATE (PREDICTABILITY OF BENCHMARK RULE RETURNS)
-+--------+---------+--------------------+-------------+---------+------------------------------------------------+
-| Asset  | Horizon | Best Feature       | Spearman IC | OOS R2  | Timing Status                                  |
-+--------+---------+--------------------+-------------+---------+------------------------------------------------+
-| BTCUSD | 1       | BTCUSD_vol_level   | -0.0132     | -0.0001 | REJECT (RL Target: Drawdown Minimization Only) |
-| BTCUSD | 4       | BTCUSD_vol_level   | -0.0202     | -0.0003 | REJECT (RL Target: Drawdown Minimization Only) |
-| BTCUSD | 16      | US500_kc_dist20    | +0.0466     | -0.0045 | REJECT (RL Target: Drawdown Minimization Only) |
-| BTCUSD | 96      | US500_vol_level    | +0.1030     | -0.0195 | REJECT (RL Target: Drawdown Minimization Only) |
-| US500  | 96      | US500_kc_dist96    | +0.1069     | -0.0802 | REJECT (RL Target: Drawdown Minimization Only) |
-| USDJPY | 1       | USDJPY_kc_dist20   | -0.0091     | -0.0001 | REJECT (RL Target: Drawdown Minimization Only) |
-| USDJPY | 4       | XTIUSD_cumret_20d  | +0.0186     | -0.0005 | REJECT (RL Target: Drawdown Minimization Only) |
-| USDJPY | 16      | XTIUSD_cumret_20d  | +0.0378     | -0.0019 | REJECT (RL Target: Drawdown Minimization Only) |
-| USDJPY | 96      | XTIUSD_cumret_20d  | +0.0821     | -0.0177 | REJECT (RL Target: Drawdown Minimization Only) |
-| XAGUSD | 1       | US500_breakout_20d | +0.0120     | -0.0003 | REJECT (RL Target: Drawdown Minimization Only) |
-| XAGUSD | 4       | US500_cumret_20d   | +0.0281     | -0.0001 | REJECT (RL Target: Drawdown Minimization Only) |
-| XAGUSD | 16      | US500_breakout_20d | +0.0435     | -0.0003 | REJECT (RL Target: Drawdown Minimization Only) |
-| XAGUSD | 96      | USDJPY_vol_level   | +0.0941     | -0.0056 | REJECT (RL Target: Drawdown Minimization Only) |
-| XAUUSD | 1       | XAUUSD_cumret_20d  | +0.0190     | -0.0003 | REJECT (RL Target: Drawdown Minimization Only) |
-| XAUUSD | 4       | BTCUSD_kc_dist96   | -0.0236     | -0.0001 | REJECT (RL Target: Drawdown Minimization Only) |
-| XAUUSD | 16      | BTCUSD_vol_level   | -0.0322     | -0.0030 | REJECT (RL Target: Drawdown Minimization Only) |
-| XAUUSD | 96      | XTIUSD_cumret_20d  | -0.0604     | -0.0098 | REJECT (RL Target: Drawdown Minimization Only) |
-| XTIUSD | 4       | XAUUSD_vol_level   | +0.0191     | -0.0005 | REJECT (RL Target: Drawdown Minimization Only) |
-| XTIUSD | 16      | US500_vol_level    | +0.0319     | -0.0006 | REJECT (RL Target: Drawdown Minimization Only) |
-| XTIUSD | 96      | BTCUSD_vol_level   | -0.0707     | -0.0100 | REJECT (RL Target: Drawdown Minimization Only) |
-+--------+---------+--------------------+-------------+---------+------------------------------------------------+
++--------+---------+---------------------+-------------+---------+------------------------------------------------+
+| Asset  | Horizon | Best Feature        | Spearman IC | OOS R2  | Timing Status                                  |
++--------+---------+---------------------+-------------+---------+------------------------------------------------+
+| BTCUSD | 1       | BTCUSD_intraday_mom | -0.0134     | +0.0001 | REJECT (RL Target: Drawdown Minimization Only) |
+| BTCUSD | 4       | BTCUSD_yz_vol       | +0.0204     | -0.0002 | REJECT (RL Target: Drawdown Minimization Only) |
+| BTCUSD | 16      | XAGUSD_rs_neg       | -0.0440     | +0.0000 | ADMIT (RL Target: Active timing viable)        |
+| BTCUSD | 96      | XAGUSD_har_rv5      | -0.0971     | -0.0334 | REJECT (RL Target: Drawdown Minimization Only) |
+| US500  | 96      | US500_signed_jump   | -0.0936     | -0.0956 | REJECT (RL Target: Drawdown Minimization Only) |
+| USDJPY | 1       | US500_yz_vol        | -0.0119     | -0.0000 | REJECT (RL Target: Drawdown Minimization Only) |
+| USDJPY | 4       | US500_vol_level     | -0.0236     | +0.0001 | ADMIT (RL Target: Active timing viable)        |
+| USDJPY | 16      | US500_vol_level     | -0.0431     | -0.0024 | REJECT (RL Target: Drawdown Minimization Only) |
+| USDJPY | 96      | US500_vol_level     | -0.0982     | +0.0024 | ADMIT (RL Target: Active timing viable)        |
+| XAGUSD | 1       | XAGUSD_kc_dist20    | -0.0224     | -0.0002 | REJECT (RL Target: Drawdown Minimization Only) |
+| XAGUSD | 4       | XAGUSD_kc_dist20    | -0.0307     | -0.0012 | REJECT (RL Target: Drawdown Minimization Only) |
+| XAGUSD | 16      | USDJPY_carry_signal | -0.0393     | -0.0063 | REJECT (RL Target: Drawdown Minimization Only) |
+| XAGUSD | 96      | USDJPY_carry_signal | -0.0953     | -0.0303 | REJECT (RL Target: Drawdown Minimization Only) |
+| XAUUSD | 1       | XAUUSD_cumret_20d   | -0.0171     | -0.0000 | REJECT (RL Target: Drawdown Minimization Only) |
+| XAUUSD | 4       | XAUUSD_cumret_20d   | -0.0207     | -0.0000 | REJECT (RL Target: Drawdown Minimization Only) |
+| XAUUSD | 16      | USDJPY_carry_signal | -0.0316     | +0.0001 | ADMIT (RL Target: Active timing viable)        |
+| XAUUSD | 96      | XTIUSD_har_rv5      | -0.0674     | -0.0028 | REJECT (RL Target: Drawdown Minimization Only) |
+| XTIUSD | 4       | XAUUSD_har_rv5      | +0.0211     | -0.0001 | REJECT (RL Target: Drawdown Minimization Only) |
+| XTIUSD | 16      | XAGUSD_vol_level    | -0.0425     | -0.0014 | REJECT (RL Target: Drawdown Minimization Only) |
+| XTIUSD | 96      | XTIUSD_har_rv5      | +0.0657     | -0.0163 | REJECT (RL Target: Drawdown Minimization Only) |
++--------+---------+---------------------+-------------+---------+------------------------------------------------+
 
 NEW ASSUMPTION 3: DATA SNOOPING ANALYSIS (SPA / BOOTSTRAP OVER THE GRID)
 +--------+---------+-----------------+-------------------+--------------------+
 | Asset  | Horizon | Mean Bar Return | Bootstrap p-value | Snooping Diagnosis |
 +--------+---------+-----------------+-------------------+--------------------+
-| BTCUSD | 1       | -0.000110       | 1.0000            | NOISE DOMINATED    |
-| BTCUSD | 4       | -0.000034       | 1.0000            | NOISE DOMINATED    |
-| BTCUSD | 16      | -0.000003       | 1.0000            | NOISE DOMINATED    |
-| BTCUSD | 96      | -0.000006       | 1.0000            | NOISE DOMINATED    |
-| US500  | 96      | -0.000100       | 1.0000            | NOISE DOMINATED    |
-| USDJPY | 1       | +0.000000       | 0.5450            | NOISE DOMINATED    |
-| USDJPY | 4       | +0.000000       | 0.4850            | NOISE DOMINATED    |
-| USDJPY | 16      | +0.000000       | 0.4900            | NOISE DOMINATED    |
-| USDJPY | 96      | -0.000000       | 1.0000            | NOISE DOMINATED    |
-| XAGUSD | 1       | -0.000202       | 1.0000            | NOISE DOMINATED    |
-| XAGUSD | 4       | -0.000112       | 1.0000            | NOISE DOMINATED    |
-| XAGUSD | 16      | -0.000063       | 1.0000            | NOISE DOMINATED    |
-| XAGUSD | 96      | -0.000020       | 1.0000            | NOISE DOMINATED    |
-| XAUUSD | 1       | -0.000025       | 1.0000            | NOISE DOMINATED    |
-| XAUUSD | 4       | -0.000009       | 1.0000            | NOISE DOMINATED    |
-| XAUUSD | 16      | -0.000000       | 1.0000            | NOISE DOMINATED    |
-| XAUUSD | 96      | +0.000007       | 0.0300            | CONFIDENT EDGE     |
-| XTIUSD | 4       | -0.000449       | 1.0000            | NOISE DOMINATED    |
-| XTIUSD | 16      | -0.000237       | 1.0000            | NOISE DOMINATED    |
-| XTIUSD | 96      | -0.000068       | 1.0000            | NOISE DOMINATED    |
+| BTCUSD | 1       | +0.000011       | 0.2300            | NOISE DOMINATED    |
+| BTCUSD | 4       | +0.000011       | 0.2450            | NOISE DOMINATED    |
+| BTCUSD | 16      | +0.000011       | 0.2350            | NOISE DOMINATED    |
+| BTCUSD | 96      | +0.000011       | 0.2350            | NOISE DOMINATED    |
+| US500  | 96      | -0.000004       | 1.0000            | NOISE DOMINATED    |
+| USDJPY | 1       | -0.000003       | 1.0000            | NOISE DOMINATED    |
+| USDJPY | 4       | -0.000003       | 1.0000            | NOISE DOMINATED    |
+| USDJPY | 16      | -0.000003       | 1.0000            | NOISE DOMINATED    |
+| USDJPY | 96      | -0.000003       | 1.0000            | NOISE DOMINATED    |
+| XAGUSD | 1       | -0.000003       | 1.0000            | NOISE DOMINATED    |
+| XAGUSD | 4       | -0.000003       | 1.0000            | NOISE DOMINATED    |
+| XAGUSD | 16      | -0.000003       | 1.0000            | NOISE DOMINATED    |
+| XAGUSD | 96      | -0.000003       | 1.0000            | NOISE DOMINATED    |
+| XAUUSD | 1       | +0.000013       | 0.0050            | CONFIDENT EDGE     |
+| XAUUSD | 4       | +0.000013       | 0.0100            | CONFIDENT EDGE     |
+| XAUUSD | 16      | +0.000013       | 0.0050            | CONFIDENT EDGE     |
+| XAUUSD | 96      | +0.000013       | 0.0050            | CONFIDENT EDGE     |
+| XTIUSD | 4       | -0.000014       | 1.0000            | NOISE DOMINATED    |
+| XTIUSD | 16      | -0.000014       | 1.0000            | NOISE DOMINATED    |
+| XTIUSD | 96      | -0.000014       | 1.0000            | NOISE DOMINATED    |
 +--------+---------+-----------------+-------------------+--------------------+
 
-Joint Superior Predictive Ability (Hansen SPA) Family-Wise p-value: 0.1300
-Warning: Failed to reject global snooping null. Use extreme capital conservative bounds.
+Joint Superior Predictive Ability (Hansen SPA) Family-Wise p-value: 0.0100
+Snooping Rejected: The universe contains statistically significant trading premiums.
 
-STRICT ADMISSIBLE UNIVERSE SIZE: 1 of 20
-ADMITTED STRICT FOR CELL2: ('XAUUSD', 96)
+STRICT ADMISSIBLE FILTERING DIAGNOSTIC (STATISTICAL VERIFICATION):
++--------+----+---------+---------------+------------------+-------------+--------------+--------------------------------+
+| Asset  | H  | Vol R2  | Vol 95% CI Lo | Vol Perm Null 95 | Target KPSS | Regime Break | Strict Decision                |
++--------+----+---------+---------------+------------------+-------------+--------------+--------------------------------+
+| BTCUSD | 1  | +0.0117 | +0.0095       | -0.0002          | PASS        | NO           | ADMITTED (STRICT)              |
+| BTCUSD | 4  | +0.0326 | +0.0241       | +0.0032          | PASS        | NO           | ADMITTED (STRICT)              |
+| BTCUSD | 16 | +0.0278 | +0.0071       | -0.0008          | PASS        | NO           | ADMITTED (STRICT)              |
+| BTCUSD | 96 | -0.0036 | -0.0651       | +0.0132          | PASS        | NO           | REJECTED (FAILED CI/NULL/KPSS) |
+| US500  | 96 | +0.0582 | +0.0074       | +0.0082          | FAIL        | YES          | REJECTED (FAILED CI/NULL/KPSS) |
+| USDJPY | 1  | +0.0088 | +0.0058       | -0.0007          | PASS        | NO           | REJECTED (FAILED CI/NULL/KPSS) |
+| USDJPY | 4  | +0.0286 | +0.0196       | +0.0052          | PASS        | NO           | ADMITTED (STRICT)              |
+| USDJPY | 16 | +0.0099 | -0.0121       | -0.0062          | PASS        | NO           | REJECTED (FAILED CI/NULL/KPSS) |
+| USDJPY | 96 | -0.0326 | -0.0876       | +0.0160          | PASS        | YES          | REJECTED (FAILED CI/NULL/KPSS) |
+| XAGUSD | 1  | +0.0106 | +0.0088       | +0.0010          | PASS        | NO           | ADMITTED (STRICT)              |
+| XAGUSD | 4  | +0.0207 | +0.0155       | +0.0021          | PASS        | NO           | ADMITTED (STRICT)              |
+| XAGUSD | 16 | +0.0011 | -0.0192       | -0.0019          | PASS        | NO           | REJECTED (FAILED CI/NULL/KPSS) |
+| XAGUSD | 96 | +0.0070 | -0.0651       | +0.0153          | PASS        | NO           | REJECTED (FAILED CI/NULL/KPSS) |
+| XAUUSD | 1  | +0.0100 | +0.0075       | +0.0007          | PASS        | NO           | ADMITTED (STRICT)              |
+| XAUUSD | 4  | +0.0240 | +0.0178       | -0.0015          | PASS        | NO           | ADMITTED (STRICT)              |
+| XAUUSD | 16 | +0.0128 | -0.0026       | -0.0006          | PASS        | NO           | REJECTED (FAILED CI/NULL/KPSS) |
+| XAUUSD | 96 | +0.0107 | -0.0721       | +0.0056          | PASS        | YES          | REJECTED (FAILED CI/NULL/KPSS) |
+| XTIUSD | 4  | +0.0469 | +0.0380       | +0.0132          | PASS        | NO           | ADMITTED (STRICT)              |
+| XTIUSD | 16 | +0.0312 | +0.0163       | +0.0018          | PASS        | NO           | ADMITTED (STRICT)              |
+| XTIUSD | 96 | -0.0006 | -0.0523       | +0.0073          | FAIL        | YES          | REJECTED (FAILED CI/NULL/KPSS) |
++--------+----+---------+---------------+------------------+-------------+--------------+--------------------------------+
+
+STRICT ADMISSIBLE UNIVERSE SIZE: 10 of 20
+ADMITTED STRICT FOR CELL2: ('BTCUSD', 1)
+ADMITTED STRICT FOR CELL2: ('BTCUSD', 4)
+ADMITTED STRICT FOR CELL2: ('BTCUSD', 16)
+ADMITTED STRICT FOR CELL2: ('USDJPY', 4)
+ADMITTED STRICT FOR CELL2: ('XAGUSD', 1)
+ADMITTED STRICT FOR CELL2: ('XAGUSD', 4)
+ADMITTED STRICT FOR CELL2: ('XAUUSD', 1)
+ADMITTED STRICT FOR CELL2: ('XAUUSD', 4)
+ADMITTED STRICT FOR CELL2: ('XTIUSD', 4)
+ADMITTED STRICT FOR CELL2: ('XTIUSD', 16)
 
 2. EXECUTING CAUSAL FEATURE ABLATION ANALYSIS
-+--------+---------+------------------+--------------------+--------------------+-------------------+
-| Asset  | Horizon | Delta R2: CumRet | Delta R2: VolLevel | Delta R2: Breakout | Delta R2: KC Dist |
-+--------+---------+------------------+--------------------+--------------------+-------------------+
-| BTCUSD | 1       | -0.00014         | -0.00006           | +0.00000           | +0.00058          |
-| BTCUSD | 4       | +0.00000         | -0.00000           | +0.00000           | +0.00086          |
-| BTCUSD | 16      | +0.00000         | +0.00033           | +0.00000           | +0.00166          |
-| BTCUSD | 96      | -0.00408         | +0.00585           | +0.00000           | +0.00046          |
-| US500  | 96      | +0.00718         | +0.00226           | +0.00051           | -0.00095          |
-| USDJPY | 1       | -0.00007         | +0.00003           | +0.00000           | -0.00043          |
-| USDJPY | 4       | -0.00044         | -0.00010           | +0.00000           | -0.00000          |
-| USDJPY | 16      | -0.00259         | -0.00012           | +0.00003           | +0.00051          |
-| USDJPY | 96      | +0.00169         | +0.00234           | +0.00000           | -0.00008          |
-| XAGUSD | 1       | +0.00001         | +0.00001           | -0.00007           | +0.00008          |
-| XAGUSD | 4       | +0.00000         | -0.00024           | +0.00000           | +0.00176          |
-| XAGUSD | 16      | +0.00040         | -0.00115           | +0.00027           | -0.00005          |
-| XAGUSD | 96      | +0.00026         | +0.00433           | +0.00000           | +0.00007          |
-| XAUUSD | 1       | +0.00008         | -0.00030           | +0.00000           | -0.00048          |
-| XAUUSD | 4       | +0.00002         | +0.00050           | +0.00000           | -0.00016          |
-| XAUUSD | 16      | +0.00019         | +0.00208           | +0.00010           | -0.00026          |
-| XAUUSD | 96      | -0.00069         | +0.00118           | +0.00319           | +0.00203          |
-| XTIUSD | 4       | -0.00008         | +0.00062           | +0.00000           | +0.00040          |
-| XTIUSD | 16      | +0.00029         | -0.00124           | +0.00000           | -0.00226          |
-| XTIUSD | 96      | +0.00058         | +0.01283           | +0.00000           | +0.00000          |
-+--------+---------+------------------+--------------------+--------------------+-------------------+
++--------+---------+-------------+-------------+----------+------------+------------+-----------+
+| Asset  | Horizon | dR2: CumRet | dR2: VolLvl | dR2: HAR | dR2: YZVol | dR2: RSNeg | dR2: Jump |
++--------+---------+-------------+-------------+----------+------------+------------+-----------+
+| BTCUSD | 1       | +0.00000    | +0.00137    | +0.00000 | +0.00000   | +0.00000   | +0.00000  |
+| BTCUSD | 4       | -0.00004    | +0.00451    | -0.00003 | +0.00013   | +0.00000   | +0.00000  |
+| BTCUSD | 16      | -0.00019    | +0.00754    | -0.00020 | +0.00034   | -0.00057   | +0.00000  |
+| BTCUSD | 96      | +0.00078    | +0.00493    | -0.01017 | +0.00000   | +0.00000   | -0.00035  |
+| US500  | 96      | +0.00017    | +0.00217    | -0.00006 | +0.00154   | +0.00023   | +0.01634  |
+| USDJPY | 1       | +0.00000    | -0.00016    | -0.00003 | +0.00048   | +0.00024   | +0.00000  |
+| USDJPY | 4       | +0.00000    | -0.00108    | +0.00000 | +0.00056   | +0.00115   | +0.00000  |
+| USDJPY | 16      | +0.00000    | -0.00270    | +0.00000 | -0.00064   | +0.00042   | +0.00000  |
+| USDJPY | 96      | +0.00000    | -0.00111    | +0.00376 | -0.01363   | -0.00205   | +0.00000  |
+| XAGUSD | 1       | +0.00264    | -0.00005    | +0.00000 | -0.00045   | -0.00009   | +0.00000  |
+| XAGUSD | 4       | +0.00350    | -0.00037    | +0.00000 | +0.00005   | +0.00000   | +0.00000  |
+| XAGUSD | 16      | -0.00007    | -0.00222    | -0.00148 | -0.00046   | +0.00000   | +0.00000  |
+| XAGUSD | 96      | -0.00004    | +0.00282    | +0.01284 | -0.00274   | -0.00080   | +0.00117  |
+| XAUUSD | 1       | +0.00451    | -0.00060    | +0.00000 | +0.00003   | +0.00000   | +0.00000  |
+| XAUUSD | 4       | +0.00762    | -0.00015    | +0.00010 | -0.00053   | +0.00000   | +0.00000  |
+| XAUUSD | 16      | +0.00157    | +0.00105    | -0.00090 | +0.00054   | +0.00000   | +0.00000  |
+| XAUUSD | 96      | +0.00000    | +0.00172    | +0.01154 | +0.00118   | +0.00497   | +0.00000  |
+| XTIUSD | 4       | +0.00000    | +0.00080    | +0.00000 | +0.00000   | +0.00000   | +0.00000  |
+| XTIUSD | 16      | +0.00000    | +0.00237    | +0.00000 | +0.00000   | +0.00000   | -0.00127  |
+| XTIUSD | 96      | -0.00133    | -0.00957    | +0.00023 | -0.00364   | +0.00000   | -0.00548  |
++--------+---------+-------------+-------------+----------+------------+------------+-----------+
 
 3. EXECUTING LEDGER AUDITOR ON RECONCILIATION IDENTITIES (HISTORICAL PORTFOLIO PATHS)
 +--------+---------+-------------------------+---------------------+--------------+
 | Asset  | Horizon | Max Account Discrepancy | Mean Residual Error | Audit Status |
 +--------+---------+-------------------------+---------------------+--------------+
-| BTCUSD | 1       | 0.000000002212          | -0.000000000126     | VERIFIED     |
-| BTCUSD | 4       | 0.000000000669          | -0.000000000128     | VERIFIED     |
-| BTCUSD | 16      | 0.000000000258          | -0.000000000027     | VERIFIED     |
-| BTCUSD | 96      | 0.000000000080          | -0.000000000040     | VERIFIED     |
-| US500  | 96      | 0.000000000087          | 0.000000000009      | VERIFIED     |
-| USDJPY | 1       | 0.000000000116          | 0.000000000000      | VERIFIED     |
-| USDJPY | 4       | 0.000000000116          | 0.000000000000      | VERIFIED     |
-| USDJPY | 16      | 0.000000000116          | 0.000000000007      | VERIFIED     |
-| USDJPY | 96      | 0.000000000116          | 0.000000000001      | VERIFIED     |
-| XAGUSD | 1       | 0.000000001106          | 0.000000000197      | VERIFIED     |
-| XAGUSD | 4       | 0.000000000611          | 0.000000000162      | VERIFIED     |
-| XAGUSD | 16      | 0.000000000335          | 0.000000000020      | VERIFIED     |
-| XAGUSD | 96      | 0.000000000087          | 0.000000000016      | VERIFIED     |
-| XAUUSD | 1       | 0.000000003376          | 0.000000000011      | VERIFIED     |
-| XAUUSD | 4       | 0.000000001601          | 0.000000000342      | VERIFIED     |
-| XAUUSD | 16      | 0.000000000484          | -0.000000000150     | VERIFIED     |
-| XAUUSD | 96      | 0.000000000378          | -0.000000000045     | VERIFIED     |
-| XTIUSD | 4       | 0.000000000407          | -0.000000000147     | VERIFIED     |
-| XTIUSD | 16      | 0.000000000247          | -0.000000000073     | VERIFIED     |
-| XTIUSD | 96      | 0.000000000036          | 0.000000000001      | VERIFIED     |
+| BTCUSD | 1       | 0.000000000051          | -0.000000000019     | VERIFIED     |
+| BTCUSD | 4       | 0.000000000051          | -0.000000000019     | VERIFIED     |
+| BTCUSD | 16      | 0.000000000051          | -0.000000000019     | VERIFIED     |
+| BTCUSD | 96      | 0.000000000051          | -0.000000000019     | VERIFIED     |
+| US500  | 96      | 0.000000000018          | 0.000000000007      | VERIFIED     |
+| USDJPY | 1       | 0.000000005588          | 0.000000000850      | VERIFIED     |
+| USDJPY | 4       | 0.000000005588          | 0.000000000850      | VERIFIED     |
+| USDJPY | 16      | 0.000000005588          | 0.000000000850      | VERIFIED     |
+| USDJPY | 96      | 0.000000005588          | 0.000000000850      | VERIFIED     |
+| XAGUSD | 1       | 0.000000000027          | 0.000000000009      | VERIFIED     |
+| XAGUSD | 4       | 0.000000000027          | 0.000000000009      | VERIFIED     |
+| XAGUSD | 16      | 0.000000000027          | 0.000000000009      | VERIFIED     |
+| XAGUSD | 96      | 0.000000000027          | 0.000000000009      | VERIFIED     |
+| XAUUSD | 1       | 0.000000000175          | 0.000000000020      | VERIFIED     |
+| XAUUSD | 4       | 0.000000000175          | 0.000000000020      | VERIFIED     |
+| XAUUSD | 16      | 0.000000000175          | 0.000000000020      | VERIFIED     |
+| XAUUSD | 96      | 0.000000000175          | 0.000000000020      | VERIFIED     |
+| XTIUSD | 4       | 0.000000000011          | -0.000000000005     | VERIFIED     |
+| XTIUSD | 16      | 0.000000000011          | -0.000000000005     | VERIFIED     |
+| XTIUSD | 96      | 0.000000000011          | -0.000000000005     | VERIFIED     |
 +--------+---------+-------------------------+---------------------+--------------+
 
 4. RUNNING STANDARD GATE G0-G8 COMPATIBILITY PRE-FLIGHTS
 
 1. SHARPE SANITY, TARGET STATIONARITY & BOOTSTRAP CI TABLE:
-+--------+----+--------+------------+----------+------------------+----------+------------+------------+------------+------------+------------------------------------------------------+
-| Asset  | H  | N Test | Sh ADF(Tr) | Sh R2    | Sh R2 95% CI     | Sh Null  | Sh Tr Mean | Sh Te Mean | Ret Tr Cum | Ret Te Cum | Top Sharpe Feats                                     |
-+--------+----+--------+------------+----------+------------------+----------+------------+------------+------------+------------+------------------------------------------------------+
-| BTCUSD | 1  | 9385   | -102.31    | +0.00021 | [-0.001, +0.001] | -0.00031 | +0.0125    | -0.0071    | +1.1613    | +0.2948    | BTCUSD_kc_dist20:+0.0006, XAUUSD_kc_dist20:+0.0000   |
-| BTCUSD | 4  | 2347   | -41.40     | +0.00091 | [-0.002, +0.002] | +0.00003 | +0.0320    | +0.0148    | +4.6458    | +0.2942    | BTCUSD_kc_dist20:+0.0011, XTIUSD_kc_dist96:+0.0003   |
-| BTCUSD | 16 | 587    | -24.12     | -0.00142 | [-0.016, +0.002] | +0.00278 | +0.0625    | +0.0485    | +18.5768   | +0.3014    | XAGUSD_vol_level:+0.0010, XAUUSD_vol_level:+0.0004   |
-| BTCUSD | 96 | 98     | -14.73     | +0.00294 | [-0.059, +0.020] | +0.00648 | +0.1105    | +0.1352    | +113.3761  | +0.3040    | US500_kc_dist96:+0.0068, BTCUSD_vol_level:+0.0015    |
-| US500  | 96 | 98     | -14.33     | -0.02673 | [-0.127, +0.006] | +0.00304 | +0.1729    | +0.2635    | +18.4861   | +0.2013    | XTIUSD_vol_level:+0.0025, US500_breakout_20d:+0.0017 |
-| USDJPY | 1  | 9385   | -115.47    | -0.00016 | [-0.001, +0.000] | -0.00011 | +0.0283    | +0.0134    | -0.0317    | +0.0349    | USDJPY_kc_dist96:+0.0002, USDJPY_vol_level:+0.0001   |
-| USDJPY | 4  | 2347   | -40.33     | -0.00041 | [-0.003, -0.000] | +0.00037 | +0.0498    | +0.0360    | -0.1332    | +0.0341    | XAUUSD_vol_level:+0.0002, USDJPY_kc_dist96:+0.0001   |
-| USDJPY | 16 | 587    | -23.42     | -0.00359 | [-0.016, +0.002] | +0.00018 | +0.0723    | +0.0327    | -0.4714    | +0.0337    | XTIUSD_cumret_20d:+0.0004, BTCUSD_vol_level:+0.0003  |
-| USDJPY | 96 | 98     | -14.56     | +0.00428 | [-0.050, +0.015] | +0.00746 | +0.1071    | +0.0970    | -2.7304    | +0.0297    | XAGUSD_vol_level:+0.0031, XTIUSD_vol_level:+0.0026   |
-| XAGUSD | 1  | 9385   | -140.79    | -0.00019 | [-0.002, +0.001] | -0.00038 | +0.0196    | +0.0413    | +0.3492    | +0.2339    | XAGUSD_kc_dist20:+0.0006, XAUUSD_kc_dist96:+0.0000   |
-| XAGUSD | 4  | 2347   | -38.11     | -0.00212 | [-0.007, +0.001] | -0.00313 | +0.0445    | +0.1027    | +1.3894    | +0.2349    | XAGUSD_kc_dist20:+0.0013, USDJPY_kc_dist20:+0.0002   |
-| XAGUSD | 16 | 587    | -23.40     | -0.00484 | [-0.021, +0.000] | -0.00181 | +0.0633    | +0.1170    | +5.4667    | +0.2333    | XAUUSD_cumret_20d:+0.0012, US500_vol_level:+0.0004   |
-| XAGUSD | 96 | 98     | -14.72     | -0.00190 | [-0.054, +0.020] | -0.00689 | +0.0726    | +0.1690    | +32.4553   | +0.2325    | US500_vol_level:+0.0122, XTIUSD_vol_level:+0.0087    |
-| XAUUSD | 1  | 9385   | -139.78    | -0.00052 | [-0.001, -0.000] | +0.00010 | +0.0244    | +0.0139    | +0.5432    | +0.1021    | BTCUSD_vol_level:+0.0001, XAUUSD_cumret_20d:+0.0000  |
-| XAUUSD | 4  | 2347   | -39.75     | -0.00045 | [-0.005, +0.001] | +0.00007 | +0.0629    | +0.0455    | +2.1746    | +0.1030    | USDJPY_vol_level:+0.0004, XAUUSD_vol_level:+0.0001   |
-| XAUUSD | 16 | 587    | -23.32     | -0.00246 | [-0.016, +0.001] | +0.00111 | +0.1122    | +0.0799    | +8.5557    | +0.0999    | USDJPY_vol_level:+0.0004, XTIUSD_kc_dist96:+0.0004   |
-| XAUUSD | 96 | 98     | -14.16     | -0.00182 | [-0.083, +0.014] | +0.00549 | +0.1963    | +0.1529    | +49.9686   | +0.1026    | USDJPY_vol_level:+0.0074, US500_cumret_20d:+0.0041   |
-| XTIUSD | 4  | 2347   | -39.00     | +0.00013 | [-0.002, +0.002] | +0.00059 | +0.0118    | +0.0186    | -1.5481    | +0.0425    | XTIUSD_vol_level:+0.0003, BTCUSD_kc_dist96:+0.0001   |
-| XTIUSD | 16 | 587    | -23.70     | -0.00192 | [-0.010, +0.004] | +0.00387 | +0.0198    | +0.0209    | -6.0919    | +0.0436    | XTIUSD_cumret_20d:+0.0013, USDJPY_kc_dist20:+0.0003  |
-| XTIUSD | 96 | 98     | -14.38     | +0.00861 | [-0.056, +0.024] | +0.00763 | +0.0168    | +0.0624    | -36.0312   | +0.0438    | US500_vol_level:+0.0077, USDJPY_vol_level:+0.0031    |
-+--------+----+--------+------------+----------+------------------+----------+------------+------------+------------+------------+------------------------------------------------------+
++--------+----+--------+------------+----------+------------------+----------+------------+------------+------------+------------+---------------------------------------------------------+
+| Asset  | H  | N Test | Sh ADF(Tr) | Sh R2    | Sh R2 95% CI     | Sh Null  | Sh Tr Mean | Sh Te Mean | Ret Tr Cum | Ret Te Cum | Top Sharpe Feats                                        |
++--------+----+--------+------------+----------+------------------+----------+------------+------------+------------+------------+---------------------------------------------------------+
+| BTCUSD | 1  | 9385   | -102.31    | +0.00047 | [-0.001, +0.001] | -0.00027 | +0.0125    | -0.0071    | +1.1613    | +0.2948    | BTCUSD_intraday_mom:+0.0010, BTCUSD_kc_dist20:+0.0000   |
+| BTCUSD | 4  | 2347   | -41.40     | +0.00060 | [-0.002, +0.002] | +0.00064 | +0.0320    | +0.0148    | +4.6458    | +0.2942    | BTCUSD_intraday_mom:+0.0010, XAGUSD_cross_rv:+0.0006    |
+| BTCUSD | 16 | 587    | -24.12     | +0.00163 | [-0.008, +0.004] | +0.00206 | +0.0625    | +0.0485    | +18.5768   | +0.3014    | XAGUSD_cross_rv:+0.0012, XTIUSD_cross_rv:+0.0010        |
+| BTCUSD | 96 | 98     | -14.73     | +0.01502 | [-0.050, +0.035] | +0.01068 | +0.1105    | +0.1352    | +113.3761  | +0.3040    | USDJPY_overnight_vol:+0.0203, XTIUSD_cumret_20d:+0.0034 |
+| US500  | 96 | 98     | -14.33     | -0.00110 | [-0.096, +0.035] | -0.00186 | +0.1729    | +0.2635    | +18.4861   | +0.2013    | USDJPY_har_rv5:+0.0179, XAUUSD_har_rv1:+0.0070          |
+| USDJPY | 1  | 9385   | -115.47    | -0.00037 | [-0.001, +0.000] | -0.00011 | +0.0283    | +0.0134    | -0.0317    | +0.0349    | USDJPY_vol_level:+0.0000, USDJPY_kc_dist96:+0.0000      |
+| USDJPY | 4  | 2347   | -40.33     | -0.00052 | [-0.004, +0.001] | +0.00022 | +0.0498    | +0.0360    | -0.1332    | +0.0341    | XTIUSD_har_rv5:+0.0001, XAGUSD_cross_rv:+0.0000         |
+| USDJPY | 16 | 587    | -23.42     | -0.00448 | [-0.016, +0.001] | -0.00003 | +0.0723    | +0.0327    | -0.4714    | +0.0337    | XAUUSD_rs_neg:+0.0005, XTIUSD_cumret_20d:+0.0000        |
+| USDJPY | 96 | 98     | -14.56     | -0.00881 | [-0.080, +0.006] | +0.01037 | +0.1071    | +0.0970    | -2.7304    | +0.0297    | XTIUSD_cumret_20d:+0.0027, XTIUSD_vol_level:+0.0002     |
+| XAGUSD | 1  | 9385   | -140.79    | -0.00020 | [-0.002, +0.000] | -0.00036 | +0.0196    | +0.0413    | +0.3492    | +0.2339    | XAGUSD_kc_dist20:+0.0005, US500_har_rv5:+0.0001         |
+| XAGUSD | 4  | 2347   | -38.11     | -0.00188 | [-0.007, +0.001] | -0.00340 | +0.0445    | +0.1027    | +1.3894    | +0.2349    | XAGUSD_kc_dist20:+0.0015, USDJPY_rs_neg:+0.0001         |
+| XAGUSD | 16 | 587    | -23.40     | -0.00543 | [-0.023, -0.001] | -0.00211 | +0.0633    | +0.1170    | +5.4667    | +0.2333    | XAGUSD_cumret_20d:+0.0003, US500_yz_vol:+0.0003         |
+| XAGUSD | 96 | 98     | -14.72     | -0.02189 | [-0.082, -0.002] | +0.01180 | +0.0726    | +0.1690    | +32.4553   | +0.2325    | BTCUSD_cross_rv:+0.0010, USDJPY_yz_vol:+0.0009          |
+| XAUUSD | 1  | 9385   | -139.78    | -0.00011 | [-0.001, +0.000] | +0.00010 | +0.0244    | +0.0139    | +0.5432    | +0.1021    | XAUUSD_cumret_20d:+0.0003, BTCUSD_kc_dist20:+0.0001     |
+| XAUUSD | 4  | 2347   | -39.75     | -0.00021 | [-0.004, +0.001] | -0.00014 | +0.0629    | +0.0455    | +2.1746    | +0.1030    | BTCUSD_cross_rv:+0.0003, BTCUSD_vol_level:+0.0001       |
+| XAUUSD | 16 | 587    | -23.32     | -0.00180 | [-0.015, +0.001] | +0.00080 | +0.1122    | +0.0799    | +8.5557    | +0.0999    | US500_signed_jump:+0.0016, USDJPY_vol_level:+0.0009     |
+| XAUUSD | 96 | 98     | -14.16     | -0.01136 | [-0.083, +0.004] | +0.00578 | +0.1963    | +0.1529    | +49.9686   | +0.1026    | BTCUSD_cross_rv:+0.0043, USDJPY_yz_vol:+0.0030          |
+| XTIUSD | 4  | 2347   | -39.00     | +0.00024 | [-0.003, +0.001] | +0.00081 | +0.0118    | +0.0186    | -1.5481    | +0.0425    | XAGUSD_cross_rv:+0.0004, BTCUSD_signed_jump:+0.0002     |
+| XTIUSD | 16 | 587    | -23.70     | -0.00118 | [-0.009, +0.004] | +0.00354 | +0.0198    | +0.0209    | -6.0919    | +0.0436    | US500_rs_neg:+0.0008, US500_har_rv1:+0.0005             |
+| XTIUSD | 96 | 98     | -14.38     | +0.00292 | [-0.080, +0.034] | +0.00899 | +0.0168    | +0.0624    | -36.0312   | +0.0438    | US500_rs_neg:+0.0140, BTCUSD_cross_rv:+0.0024           |
++--------+----+--------+------------+----------+------------------+----------+------------+------------+------------+------------+---------------------------------------------------------+
 
 2. LOG-VOLATILITY PREDICTABILITY, STATIONARITY & VOL REGIME DRIFT TABLE:
 +--------+----+-------+-------------+----------+------------------+----------+-----------+-------------+---------+---------+-----------------------------+
 | Asset  | H  | Purge | Vol ADF(Tr) | Vol R2   | Vol R2 95% CI    | Vol Null | Vol Shift | Vol Std Rat | ACF P1  | ACF P2  | Alert                       |
 +--------+----+-------+-------------+----------+------------------+----------+-----------+-------------+---------+---------+-----------------------------+
-| BTCUSD | 1  | 2     | -26.91      | +0.01076 | [+0.009, +0.014] | +0.00007 | -0.0495   | 0.9872      | 0.1115  | 0.1042  | High Vol ACF                |
-| BTCUSD | 4  | 8     | -30.49      | +0.03029 | [+0.022, +0.037] | +0.00688 | -0.0577   | 1.0183      | 0.2702  | 0.1776  | High Vol ACF                |
-| BTCUSD | 16 | 32    | -20.44      | +0.02752 | [+0.007, +0.043] | -0.00459 | -0.1260   | 1.0064      | 0.0724  | 0.0664  | High Vol ACF                |
-| BTCUSD | 96 | 192   | -12.15      | +0.00119 | [-0.052, +0.021] | +0.01246 | +0.0496   | 1.0453      | 0.0487  | -0.0869 | None                        |
-| US500  | 96 | 192   | -13.93      | +0.03945 | [-0.021, +0.067] | +0.01905 | +0.0308   | 0.9666      | 0.0049  | -0.0466 | None                        |
-| USDJPY | 1  | 2     | -23.65      | +0.00809 | [+0.005, +0.011] | -0.00042 | -0.0594   | 1.0128      | 0.1129  | 0.1036  | High Vol ACF                |
-| USDJPY | 4  | 8     | -22.80      | +0.02677 | [+0.018, +0.037] | +0.00387 | -0.0393   | 0.9628      | 0.2181  | 0.0546  | High Vol ACF                |
-| USDJPY | 16 | 32    | -18.11      | +0.01171 | [-0.012, +0.032] | -0.00357 | -0.1684   | 1.0450      | 0.1838  | 0.1052  | High Vol ACF + Regime Drift |
-| USDJPY | 96 | 192   | -13.00      | -0.01290 | [-0.054, +0.003] | +0.01946 | +0.1537   | 1.2170      | 0.0024  | -0.0711 | Vol Regime Drift            |
-| XAGUSD | 1  | 2     | -27.43      | +0.00942 | [+0.007, +0.010] | +0.00057 | +0.0023   | 0.9443      | 0.1082  | 0.0923  | High Vol ACF                |
-| XAGUSD | 4  | 8     | -27.28      | +0.01766 | [+0.013, +0.023] | +0.00142 | -0.0611   | 0.9907      | 0.1994  | 0.0468  | High Vol ACF                |
-| XAGUSD | 16 | 32    | -27.67      | +0.00128 | [-0.018, +0.009] | -0.00205 | -0.1150   | 1.0061      | -0.0703 | -0.1035 | High Vol ACF                |
-| XAGUSD | 96 | 192   | -13.88      | +0.02500 | [-0.031, +0.065] | +0.00761 | -0.0440   | 0.9502      | -0.0100 | -0.0550 | None                        |
-| XAUUSD | 1  | 2     | -32.01      | +0.00743 | [+0.005, +0.009] | +0.00036 | -0.0293   | 0.9873      | 0.1263  | 0.1098  | High Vol ACF                |
-| XAUUSD | 4  | 8     | -28.74      | +0.02079 | [+0.014, +0.027] | -0.00010 | -0.0754   | 0.9532      | 0.2316  | 0.0716  | High Vol ACF                |
-| XAUUSD | 16 | 32    | -27.54      | +0.01396 | [-0.001, +0.024] | +0.00078 | -0.1016   | 1.0473      | -0.0471 | -0.0613 | None                        |
-| XAUUSD | 96 | 192   | -14.64      | -0.01366 | [-0.100, +0.006] | +0.00199 | -0.1760   | 0.8330      | -0.0365 | -0.0310 | Vol Regime Drift            |
-| XTIUSD | 4  | 8     | -41.85      | +0.02817 | [+0.021, +0.035] | +0.00509 | -0.0670   | 1.0681      | 0.3698  | 0.1665  | High Vol ACF                |
-| XTIUSD | 16 | 32    | -26.17      | +0.02255 | [+0.008, +0.033] | +0.00547 | -0.0485   | 1.0746      | -0.1894 | -0.0726 | High Vol ACF                |
-| XTIUSD | 96 | 192   | -13.96      | +0.01143 | [-0.041, +0.044] | +0.02037 | +0.1214   | 0.8160      | 0.0453  | -0.0668 | None                        |
+| BTCUSD | 1  | 2     | -26.91      | +0.01169 | [+0.009, +0.014] | -0.00019 | -0.0495   | 0.9872      | 0.1115  | 0.1042  | High Vol ACF                |
+| BTCUSD | 4  | 8     | -30.49      | +0.03265 | [+0.024, +0.039] | +0.00320 | -0.0577   | 1.0183      | 0.2702  | 0.1776  | High Vol ACF                |
+| BTCUSD | 16 | 32    | -20.44      | +0.02779 | [+0.007, +0.043] | -0.00082 | -0.1260   | 1.0064      | 0.0724  | 0.0664  | High Vol ACF                |
+| BTCUSD | 96 | 192   | -12.15      | -0.00363 | [-0.065, +0.024] | +0.01316 | +0.0496   | 1.0453      | 0.0487  | -0.0869 | None                        |
+| US500  | 96 | 192   | -13.93      | +0.05820 | [+0.007, +0.089] | +0.00818 | +0.0308   | 0.9666      | 0.0049  | -0.0466 | None                        |
+| USDJPY | 1  | 2     | -23.65      | +0.00875 | [+0.006, +0.012] | -0.00070 | -0.0594   | 1.0128      | 0.1129  | 0.1036  | High Vol ACF                |
+| USDJPY | 4  | 8     | -22.80      | +0.02861 | [+0.020, +0.038] | +0.00517 | -0.0393   | 0.9628      | 0.2181  | 0.0546  | High Vol ACF                |
+| USDJPY | 16 | 32    | -18.11      | +0.00985 | [-0.012, +0.029] | -0.00617 | -0.1684   | 1.0450      | 0.1838  | 0.1052  | High Vol ACF + Regime Drift |
+| USDJPY | 96 | 192   | -13.00      | -0.03260 | [-0.088, -0.009] | +0.01600 | +0.1537   | 1.2170      | 0.0024  | -0.0711 | Vol Regime Drift            |
+| XAGUSD | 1  | 2     | -27.43      | +0.01058 | [+0.009, +0.012] | +0.00095 | +0.0023   | 0.9443      | 0.1082  | 0.0923  | High Vol ACF                |
+| XAGUSD | 4  | 8     | -27.28      | +0.02067 | [+0.015, +0.026] | +0.00211 | -0.0611   | 0.9907      | 0.1994  | 0.0468  | High Vol ACF                |
+| XAGUSD | 16 | 32    | -27.67      | +0.00108 | [-0.019, +0.011] | -0.00192 | -0.1150   | 1.0061      | -0.0703 | -0.1035 | High Vol ACF                |
+| XAGUSD | 96 | 192   | -13.88      | +0.00701 | [-0.065, +0.038] | +0.01532 | -0.0440   | 0.9502      | -0.0100 | -0.0550 | None                        |
+| XAUUSD | 1  | 2     | -32.01      | +0.00999 | [+0.007, +0.011] | +0.00074 | -0.0293   | 0.9873      | 0.1263  | 0.1098  | High Vol ACF                |
+| XAUUSD | 4  | 8     | -28.74      | +0.02400 | [+0.018, +0.030] | -0.00152 | -0.0754   | 0.9532      | 0.2316  | 0.0716  | High Vol ACF                |
+| XAUUSD | 16 | 32    | -27.54      | +0.01281 | [-0.003, +0.022] | -0.00063 | -0.1016   | 1.0473      | -0.0471 | -0.0613 | None                        |
+| XAUUSD | 96 | 192   | -14.64      | +0.01069 | [-0.072, +0.047] | +0.00557 | -0.1760   | 0.8330      | -0.0365 | -0.0310 | Vol Regime Drift            |
+| XTIUSD | 4  | 8     | -41.85      | +0.04695 | [+0.038, +0.054] | +0.01324 | -0.0670   | 1.0681      | 0.3698  | 0.1665  | High Vol ACF                |
+| XTIUSD | 16 | 32    | -26.17      | +0.03124 | [+0.016, +0.043] | +0.00182 | -0.0485   | 1.0746      | -0.1894 | -0.0726 | High Vol ACF                |
+| XTIUSD | 96 | 192   | -13.96      | -0.00062 | [-0.052, +0.036] | +0.00733 | +0.1214   | 0.8160      | 0.0453  | -0.0668 | None                        |
 +--------+----+-------+-------------+----------+------------------+----------+-----------+-------------+---------+---------+-----------------------------+
 
 3. TARGET STATIONARITY & KPSS LONG-MEMORY DIAGNOSTIC TABLE:
 +--------+----+----------------+-----------+------------+------------+-------------+------------------------+
 | Asset  | H  | Target Type    | ADF Score | ADF Result | KPSS Score | KPSS Result | Joint Classification   |
 +--------+----+----------------+-----------+------------+------------+-------------+------------------------+
-| XAGUSD | 4  | Sharpe Ratio   | -38.1091  | PASS       | 0.2952     | PASS        | Trend-Stationary       |
-| XAGUSD | 4  | Log Volatility | -27.2800  | PASS       | 0.0592     | PASS        | Trend-Stationary       |
-| XAGUSD | 1  | Sharpe Ratio   | -140.7910 | PASS       | 0.1174     | PASS        | Trend-Stationary       |
-| XAGUSD | 1  | Log Volatility | -27.4256  | PASS       | 0.1403     | PASS        | Trend-Stationary       |
-| XAGUSD | 16 | Sharpe Ratio   | -23.3972  | PASS       | 0.2108     | PASS        | Trend-Stationary       |
-| XAGUSD | 16 | Log Volatility | -27.6670  | PASS       | 0.2395     | PASS        | Trend-Stationary       |
-| USDJPY | 96 | Sharpe Ratio   | -14.5595  | PASS       | 1.5492     | FAIL        | Long Memory / Frac Int |
-| USDJPY | 96 | Log Volatility | -12.9970  | PASS       | 0.3413     | PASS        | Trend-Stationary       |
-| XTIUSD | 96 | Sharpe Ratio   | -14.3760  | PASS       | 0.2665     | PASS        | Trend-Stationary       |
-| XTIUSD | 96 | Log Volatility | -13.9645  | PASS       | 0.8462     | FAIL        | Long Memory / Frac Int |
+| XAUUSD | 4  | Sharpe Ratio   | -39.7494  | PASS       | 0.8040     | FAIL        | Long Memory / Frac Int |
+| XAUUSD | 4  | Log Volatility | -28.7351  | PASS       | 0.2335     | PASS        | Trend-Stationary       |
 | USDJPY | 4  | Sharpe Ratio   | -40.3308  | PASS       | 0.7403     | FAIL        | Long Memory / Frac Int |
 | USDJPY | 4  | Log Volatility | -22.8015  | PASS       | 0.1149     | PASS        | Trend-Stationary       |
+| XAUUSD | 16 | Sharpe Ratio   | -23.3237  | PASS       | 0.9143     | FAIL        | Long Memory / Frac Int |
+| XAUUSD | 16 | Log Volatility | -27.5378  | PASS       | 0.2885     | PASS        | Trend-Stationary       |
 | USDJPY | 1  | Sharpe Ratio   | -115.4743 | PASS       | 0.4228     | PASS        | Trend-Stationary       |
 | USDJPY | 1  | Log Volatility | -23.6525  | PASS       | 0.0830     | PASS        | Trend-Stationary       |
-| US500  | 96 | Sharpe Ratio   | -14.3335  | PASS       | 1.2385     | FAIL        | Long Memory / Frac Int |
-| US500  | 96 | Log Volatility | -13.9262  | PASS       | 1.0738     | FAIL        | Long Memory / Frac Int |
-| USDJPY | 16 | Sharpe Ratio   | -23.4167  | PASS       | 0.7734     | FAIL        | Long Memory / Frac Int |
-| USDJPY | 16 | Log Volatility | -18.1135  | PASS       | 0.1035     | PASS        | Trend-Stationary       |
 | BTCUSD | 96 | Sharpe Ratio   | -14.7286  | PASS       | 0.9175     | FAIL        | Long Memory / Frac Int |
 | BTCUSD | 96 | Log Volatility | -12.1516  | PASS       | 0.3032     | PASS        | Trend-Stationary       |
+| USDJPY | 16 | Sharpe Ratio   | -23.4167  | PASS       | 0.7734     | FAIL        | Long Memory / Frac Int |
+| USDJPY | 16 | Log Volatility | -18.1135  | PASS       | 0.1035     | PASS        | Trend-Stationary       |
+| BTCUSD | 1  | Sharpe Ratio   | -102.3128 | PASS       | 0.5326     | FAIL        | Long Memory / Frac Int |
+| BTCUSD | 1  | Log Volatility | -26.9055  | PASS       | 0.0399     | PASS        | Trend-Stationary       |
+| XAGUSD | 96 | Sharpe Ratio   | -14.7230  | PASS       | 0.3209     | PASS        | Trend-Stationary       |
+| XAGUSD | 96 | Log Volatility | -13.8758  | PASS       | 0.2193     | PASS        | Trend-Stationary       |
+| BTCUSD | 4  | Sharpe Ratio   | -41.3977  | PASS       | 0.1681     | PASS        | Trend-Stationary       |
+| BTCUSD | 4  | Log Volatility | -30.4902  | PASS       | 0.0426     | PASS        | Trend-Stationary       |
+| BTCUSD | 16 | Sharpe Ratio   | -24.1187  | PASS       | 0.1438     | PASS        | Trend-Stationary       |
+| BTCUSD | 16 | Log Volatility | -20.4416  | PASS       | 0.3264     | PASS        | Trend-Stationary       |
+| XAGUSD | 1  | Sharpe Ratio   | -140.7910 | PASS       | 0.1174     | PASS        | Trend-Stationary       |
+| XAGUSD | 1  | Log Volatility | -27.4256  | PASS       | 0.1403     | PASS        | Trend-Stationary       |
+| XAGUSD | 4  | Sharpe Ratio   | -38.1091  | PASS       | 0.2952     | PASS        | Trend-Stationary       |
+| XAGUSD | 4  | Log Volatility | -27.2800  | PASS       | 0.0592     | PASS        | Trend-Stationary       |
+| XAGUSD | 16 | Sharpe Ratio   | -23.3972  | PASS       | 0.2108     | PASS        | Trend-Stationary       |
+| XAGUSD | 16 | Log Volatility | -27.6670  | PASS       | 0.2395     | PASS        | Trend-Stationary       |
+| US500  | 96 | Sharpe Ratio   | -14.3335  | PASS       | 1.2385     | FAIL        | Long Memory / Frac Int |
+| US500  | 96 | Log Volatility | -13.9262  | PASS       | 1.0738     | FAIL        | Long Memory / Frac Int |
+| XTIUSD | 96 | Sharpe Ratio   | -14.3760  | PASS       | 0.2665     | PASS        | Trend-Stationary       |
+| XTIUSD | 96 | Log Volatility | -13.9645  | PASS       | 0.8462     | FAIL        | Long Memory / Frac Int |
 | XTIUSD | 4  | Sharpe Ratio   | -38.9982  | PASS       | 0.0317     | PASS        | Trend-Stationary       |
 | XTIUSD | 4  | Log Volatility | -41.8483  | PASS       | 0.0475     | PASS        | Trend-Stationary       |
 | XTIUSD | 16 | Sharpe Ratio   | -23.7008  | PASS       | 0.0602     | PASS        | Trend-Stationary       |
 | XTIUSD | 16 | Log Volatility | -26.1742  | PASS       | 0.0905     | PASS        | Trend-Stationary       |
 | XAUUSD | 96 | Sharpe Ratio   | -14.1583  | PASS       | 1.6094     | FAIL        | Long Memory / Frac Int |
 | XAUUSD | 96 | Log Volatility | -14.6434  | PASS       | 0.4618     | PASS        | Trend-Stationary       |
-| BTCUSD | 1  | Sharpe Ratio   | -102.3128 | PASS       | 0.5326     | FAIL        | Long Memory / Frac Int |
-| BTCUSD | 1  | Log Volatility | -26.9055  | PASS       | 0.0399     | PASS        | Trend-Stationary       |
-| BTCUSD | 4  | Sharpe Ratio   | -41.3977  | PASS       | 0.1681     | PASS        | Trend-Stationary       |
-| BTCUSD | 4  | Log Volatility | -30.4902  | PASS       | 0.0426     | PASS        | Trend-Stationary       |
-| BTCUSD | 16 | Sharpe Ratio   | -24.1187  | PASS       | 0.1438     | PASS        | Trend-Stationary       |
-| BTCUSD | 16 | Log Volatility | -20.4416  | PASS       | 0.3264     | PASS        | Trend-Stationary       |
-| XAUUSD | 4  | Sharpe Ratio   | -39.7494  | PASS       | 0.8040     | FAIL        | Long Memory / Frac Int |
-| XAUUSD | 4  | Log Volatility | -28.7351  | PASS       | 0.2335     | PASS        | Trend-Stationary       |
+| USDJPY | 96 | Sharpe Ratio   | -14.5595  | PASS       | 1.5492     | FAIL        | Long Memory / Frac Int |
+| USDJPY | 96 | Log Volatility | -12.9970  | PASS       | 0.3413     | PASS        | Trend-Stationary       |
 | XAUUSD | 1  | Sharpe Ratio   | -139.7753 | PASS       | 0.4940     | FAIL        | Long Memory / Frac Int |
 | XAUUSD | 1  | Log Volatility | -32.0078  | PASS       | 0.0642     | PASS        | Trend-Stationary       |
-| XAUUSD | 16 | Sharpe Ratio   | -23.3237  | PASS       | 0.9143     | FAIL        | Long Memory / Frac Int |
-| XAUUSD | 16 | Log Volatility | -27.5378  | PASS       | 0.2885     | PASS        | Trend-Stationary       |
-| XAGUSD | 96 | Sharpe Ratio   | -14.7230  | PASS       | 0.3209     | PASS        | Trend-Stationary       |
-| XAGUSD | 96 | Log Volatility | -13.8758  | PASS       | 0.2193     | PASS        | Trend-Stationary       |
 +--------+----+----------------+-----------+------------+------------+-------------+------------------------+
 
 4. TARGET REGIME SHIFT & DRIFT DIAGNOSTIC TABLE:
 +--------+----+----------------+-------------------+-------------------+------------+------------------+------------------+-----------+----------------------+
 | Asset  | H  | Target Type    | Train Half 1 Mean | Train Half 2 Mean | Mean Shift | Train Half 1 Std | Train Half 2 Std | Std Ratio | Shift Classification |
 +--------+----+----------------+-------------------+-------------------+------------+------------------+------------------+-----------+----------------------+
-| XAGUSD | 4  | Sharpe Ratio   | +0.036264         | +0.052756         | 0.016492   | 0.974719         | 0.967769         | 0.9929    | NO (Stable)          |
-| XAGUSD | 4  | Log Volatility | +0.031504         | +0.013398         | 0.018106   | 1.614329         | 1.556458         | 0.9642    | NO (Stable)          |
-| XAGUSD | 1  | Sharpe Ratio   | +0.019767         | +0.019500         | 0.000266   | 0.990274         | 0.993797         | 1.0036    | NO (Stable)          |
-| XAGUSD | 1  | Log Volatility | -0.308845         | -0.291408         | 0.017437   | 1.969765         | 1.893054         | 0.9611    | NO (Stable)          |
-| XAGUSD | 16 | Sharpe Ratio   | +0.052796         | +0.073855         | 0.021059   | 0.931126         | 0.897764         | 0.9642    | NO (Stable)          |
-| XAGUSD | 16 | Log Volatility | +0.186002         | +0.139162         | 0.046840   | 1.572330         | 1.599282         | 1.0171    | NO (Stable)          |
-| USDJPY | 96 | Sharpe Ratio   | +0.208548         | +0.005645         | 0.202903   | 0.960003         | 0.980620         | 1.0215    | YES (Break)          |
-| USDJPY | 96 | Log Volatility | +0.060091         | +0.230637         | 0.170546   | 1.810669         | 1.890505         | 1.0441    | YES (Break)          |
-| XTIUSD | 96 | Sharpe Ratio   | +0.052289         | -0.018777         | 0.071067   | 0.973352         | 0.983742         | 1.0107    | YES (Break)          |
-| XTIUSD | 96 | Log Volatility | +0.005956         | +0.321038         | 0.315082   | 2.253896         | 2.090196         | 0.9274    | YES (Break)          |
+| XAUUSD | 4  | Sharpe Ratio   | +0.036626         | +0.089273         | 0.052647   | 0.967538         | 0.973433         | 1.0061    | YES (Break)          |
+| XAUUSD | 4  | Log Volatility | +0.028268         | -0.001923         | 0.030191   | 1.600418         | 1.579211         | 0.9867    | NO (Stable)          |
 | USDJPY | 4  | Sharpe Ratio   | +0.079124         | +0.020394         | 0.058730   | 0.961331         | 0.990901         | 1.0308    | YES (Break)          |
 | USDJPY | 4  | Log Volatility | -0.009818         | -0.021061         | 0.011243   | 1.605495         | 1.647719         | 1.0263    | NO (Stable)          |
+| XAUUSD | 16 | Sharpe Ratio   | +0.063320         | +0.161130         | 0.097809   | 0.938397         | 0.939138         | 1.0008    | YES (Break)          |
+| XAUUSD | 16 | Log Volatility | +0.175009         | +0.142106         | 0.032902   | 1.609020         | 1.517082         | 0.9429    | NO (Stable)          |
 | USDJPY | 1  | Sharpe Ratio   | +0.036017         | +0.020566         | 0.015451   | 0.992906         | 0.996613         | 1.0037    | NO (Stable)          |
 | USDJPY | 1  | Log Volatility | -0.293809         | -0.291484         | 0.002325   | 1.795462         | 1.779102         | 0.9909    | NO (Stable)          |
-| US500  | 96 | Sharpe Ratio   | +0.221083         | +0.124636         | 0.096447   | 1.002287         | 1.012438         | 1.0101    | YES (Break)          |
-| US500  | 96 | Log Volatility | -0.109745         | +0.142108         | 0.251853   | 2.129112         | 1.719181         | 0.8075    | YES (Break)          |
-| USDJPY | 16 | Sharpe Ratio   | +0.126575         | +0.017936         | 0.108639   | 0.918880         | 0.970091         | 1.0557    | YES (Break)          |
-| USDJPY | 16 | Log Volatility | +0.127809         | +0.121557         | 0.006252   | 1.658773         | 1.731179         | 1.0437    | NO (Stable)          |
 | BTCUSD | 96 | Sharpe Ratio   | +0.142046         | +0.078968         | 0.063079   | 0.949404         | 0.960295         | 1.0115    | YES (Break)          |
 | BTCUSD | 96 | Log Volatility | +0.211286         | +0.106234         | 0.105053   | 2.149413         | 1.888957         | 0.8788    | NO (Stable)          |
+| USDJPY | 16 | Sharpe Ratio   | +0.126575         | +0.017936         | 0.108639   | 0.918880         | 0.970091         | 1.0557    | YES (Break)          |
+| USDJPY | 16 | Log Volatility | +0.127809         | +0.121557         | 0.006252   | 1.658773         | 1.731179         | 1.0437    | NO (Stable)          |
+| BTCUSD | 1  | Sharpe Ratio   | +0.019548         | +0.005507         | 0.014041   | 0.999626         | 0.999891         | 1.0003    | NO (Stable)          |
+| BTCUSD | 1  | Log Volatility | -0.271223         | -0.261917         | 0.009306   | 1.818306         | 1.831310         | 1.0072    | NO (Stable)          |
+| XAGUSD | 96 | Sharpe Ratio   | +0.066158         | +0.078962         | 0.012804   | 0.961772         | 0.900747         | 0.9366    | NO (Stable)          |
+| XAGUSD | 96 | Log Volatility | +0.147230         | +0.207989         | 0.060758   | 1.835256         | 1.787435         | 0.9739    | NO (Stable)          |
+| BTCUSD | 4  | Sharpe Ratio   | +0.035572         | +0.028395         | 0.007176   | 0.948498         | 0.956648         | 1.0086    | NO (Stable)          |
+| BTCUSD | 4  | Log Volatility | +0.040876         | +0.070313         | 0.029437   | 1.546199         | 1.580839         | 1.0224    | NO (Stable)          |
+| BTCUSD | 16 | Sharpe Ratio   | +0.068875         | +0.056067         | 0.012808   | 0.903671         | 0.932627         | 1.0320    | NO (Stable)          |
+| BTCUSD | 16 | Log Volatility | +0.128098         | +0.101277         | 0.026822   | 1.547437         | 1.497242         | 0.9676    | NO (Stable)          |
+| XAGUSD | 1  | Sharpe Ratio   | +0.019767         | +0.019500         | 0.000266   | 0.990274         | 0.993797         | 1.0036    | NO (Stable)          |
+| XAGUSD | 1  | Log Volatility | -0.308845         | -0.291408         | 0.017437   | 1.969765         | 1.893054         | 0.9611    | NO (Stable)          |
+| XAGUSD | 4  | Sharpe Ratio   | +0.036264         | +0.052756         | 0.016492   | 0.974719         | 0.967769         | 0.9929    | NO (Stable)          |
+| XAGUSD | 4  | Log Volatility | +0.031504         | +0.013398         | 0.018106   | 1.614329         | 1.556458         | 0.9642    | NO (Stable)          |
+| XAGUSD | 16 | Sharpe Ratio   | +0.052796         | +0.073855         | 0.021059   | 0.931126         | 0.897764         | 0.9642    | NO (Stable)          |
+| XAGUSD | 16 | Log Volatility | +0.186002         | +0.139162         | 0.046840   | 1.572330         | 1.599282         | 1.0171    | NO (Stable)          |
+| US500  | 96 | Sharpe Ratio   | +0.221083         | +0.124636         | 0.096447   | 1.002287         | 1.012438         | 1.0101    | YES (Break)          |
+| US500  | 96 | Log Volatility | -0.109745         | +0.142108         | 0.251853   | 2.129112         | 1.719181         | 0.8075    | YES (Break)          |
+| XTIUSD | 96 | Sharpe Ratio   | +0.052289         | -0.018777         | 0.071067   | 0.973352         | 0.983742         | 1.0107    | YES (Break)          |
+| XTIUSD | 96 | Log Volatility | +0.005956         | +0.321038         | 0.315082   | 2.253896         | 2.090196         | 0.9274    | YES (Break)          |
 | XTIUSD | 4  | Sharpe Ratio   | +0.018252         | +0.005401         | 0.012851   | 0.991122         | 0.996937         | 1.0059    | NO (Stable)          |
 | XTIUSD | 4  | Log Volatility | -0.052301         | -0.057694         | 0.005393   | 1.418249         | 1.474277         | 1.0395    | NO (Stable)          |
 | XTIUSD | 16 | Sharpe Ratio   | +0.036956         | +0.002702         | 0.034254   | 0.960105         | 0.969611         | 1.0099    | NO (Stable)          |
 | XTIUSD | 16 | Log Volatility | -0.077874         | -0.034404         | 0.043470   | 1.364284         | 1.399951         | 1.0261    | NO (Stable)          |
 | XAUUSD | 96 | Sharpe Ratio   | +0.120415         | +0.272188         | 0.151773   | 0.975477         | 0.963811         | 0.9880    | YES (Break)          |
 | XAUUSD | 96 | Log Volatility | +0.253018         | +0.135113         | 0.117905   | 1.965668         | 1.970128         | 1.0023    | YES (Break)          |
-| BTCUSD | 1  | Sharpe Ratio   | +0.019548         | +0.005507         | 0.014041   | 0.999626         | 0.999891         | 1.0003    | NO (Stable)          |
-| BTCUSD | 1  | Log Volatility | -0.271223         | -0.261917         | 0.009306   | 1.818306         | 1.831310         | 1.0072    | NO (Stable)          |
-| BTCUSD | 4  | Sharpe Ratio   | +0.035572         | +0.028395         | 0.007176   | 0.948498         | 0.956648         | 1.0086    | NO (Stable)          |
-| BTCUSD | 4  | Log Volatility | +0.040876         | +0.070313         | 0.029437   | 1.546199         | 1.580839         | 1.0224    | NO (Stable)          |
-| BTCUSD | 16 | Sharpe Ratio   | +0.068875         | +0.056067         | 0.012808   | 0.903671         | 0.932627         | 1.0320    | NO (Stable)          |
-| BTCUSD | 16 | Log Volatility | +0.128098         | +0.101277         | 0.026822   | 1.547437         | 1.497242         | 0.9676    | NO (Stable)          |
-| XAUUSD | 4  | Sharpe Ratio   | +0.036626         | +0.089273         | 0.052647   | 0.967538         | 0.973433         | 1.0061    | YES (Break)          |
-| XAUUSD | 4  | Log Volatility | +0.028268         | -0.001923         | 0.030191   | 1.600418         | 1.579211         | 0.9867    | NO (Stable)          |
+| USDJPY | 96 | Sharpe Ratio   | +0.208548         | +0.005645         | 0.202903   | 0.960003         | 0.980620         | 1.0215    | YES (Break)          |
+| USDJPY | 96 | Log Volatility | +0.060091         | +0.230637         | 0.170546   | 1.810669         | 1.890505         | 1.0441    | YES (Break)          |
 | XAUUSD | 1  | Sharpe Ratio   | +0.014385         | +0.034472         | 0.020086   | 0.998003         | 0.998446         | 1.0004    | NO (Stable)          |
 | XAUUSD | 1  | Log Volatility | -0.257905         | -0.258353         | 0.000448   | 1.733251         | 1.722644         | 0.9939    | NO (Stable)          |
-| XAUUSD | 16 | Sharpe Ratio   | +0.063320         | +0.161130         | 0.097809   | 0.938397         | 0.939138         | 1.0008    | YES (Break)          |
-| XAUUSD | 16 | Log Volatility | +0.175009         | +0.142106         | 0.032902   | 1.609020         | 1.517082         | 0.9429    | NO (Stable)          |
-| XAGUSD | 96 | Sharpe Ratio   | +0.066158         | +0.078962         | 0.012804   | 0.961772         | 0.900747         | 0.9366    | NO (Stable)          |
-| XAGUSD | 96 | Log Volatility | +0.147230         | +0.207989         | 0.060758   | 1.835256         | 1.787435         | 0.9739    | NO (Stable)          |
 +--------+----+----------------+-------------------+-------------------+------------+------------------+------------------+-----------+----------------------+
 
 FINAL PIPELINE SUMMARY
@@ -427,10 +518,10 @@ FINAL PIPELINE SUMMARY
 +---------+---------------------------------------------+
 | G0      | partial-holes=2/740 holidays=0 -> PASS      |
 | G1      | admissible pairs=20/42 -> PASS              |
-| G2      | 32/32 alive                                 |
-| G3      | 32/32 stationary                            |
-| G5      | 25/32 stable                                |
+| G2      | 86/86 alive                                 |
+| G3      | 81/86 stationary                            |
+| G5      | 60/79 stable                                |
 | G8      | stationary_targets=40/40                    |
-| G6      | eff_rank=21.81 vs floor=12 (d=24) -> PASS   |
-| G7      | state shape=(67036, 25) causal-only -> PASS |
+| G6      | eff_rank=47.77 vs floor=30 (d=59) -> PASS   |
+| G7      | state shape=(67036, 60) causal-only -> PASS |
 +---------+---------------------------------------------+
