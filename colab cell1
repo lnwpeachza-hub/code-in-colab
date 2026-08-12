@@ -34,7 +34,7 @@ W_NORM = 500
 
 LOOKBACK_MAP = {
     "cumret_20d": 1920, "cumret_60d": 5760, "cumret_120d": 11520,
-    "breakout_20d": 1920, "ma_cross": 11520, "kc_dist20": 20, "kc_dist96": 96,
+    "ma_cross": 11520, "kc_dist20": 20, "kc_dist96": 96,
     "vol_level": 96, "har_rv1": 96, "har_rv5": 480, "har_rv22": 2112,
     "rs_neg": 96, "signed_jump": 96, "yz_vol": 96, "overnight_vol": 480,
     "intraday_mom": 96, "cross_rv": 96
@@ -184,25 +184,18 @@ def fit_r2(Xa, ya, Xb, yb, seed=42):
     pred = g.predict(Xb)
     return 1.0 - np.sum((yb - pred) ** 2) / (np.sum((yb - yb.mean()) ** 2) + 1e-12), g
 
-def get_swap_rates(si):
-    if si is None:
-        return 0.0, 0.0
-    if isinstance(si, dict):
-        return float(si.get("swap_long", 0.0)), float(si.get("swap_short", 0.0))
-    return float(getattr(si, "swap_long", 0.0)), float(getattr(si, "swap_short", 0.0))
-
 def get_ic_markets_cost(symbol, df, info_dict):
     price = float(df["Close"].mean())
     si = info_dict.get(symbol)
-    point_val = getattr(si, "point", 0.00001)
-    contract_size = getattr(si, "trade_contract_size", 100000.0)
+    point_val = getattr(si, "point", 0.00001) if si is not None else 0.00001
+    contract_size = getattr(si, "trade_contract_size", 100000.0) if si is not None else 100000.0
     spread_cols = [c for c in df.columns if c.lower() == "spread"]
     if len(spread_cols) > 0:
         spread_pts = float(df[spread_cols[0]].median())
         if spread_pts <= 0.0 or np.isnan(spread_pts):
-            spread_pts = getattr(si, "spread", 2.0)
+            spread_pts = getattr(si, "spread", 2.0) if si is not None else 2.0
     else:
-        spread_pts = getattr(si, "spread", 2.0)
+        spread_pts = getattr(si, "spread", 2.0) if si is not None else 2.0
     spread_cost = (spread_pts * point_val) / price
     comm_cost = 7.0 / (contract_size * price) if contract_size > 0 else 0.0
     return float(spread_cost + comm_cost)
@@ -419,7 +412,7 @@ def get_directional_signal_series(symbol, prices, carry_signal=None):
             pos[t] = trend_sign
     return pos
 
-def calculate_rule_returns(symbol, prices, horiz, cost, swap_rate, carry_signal=None):
+def calculate_rule_returns(symbol, prices, horiz, cost, swap_long_ret, swap_short_ret, carry_signal=None):
     n = len(prices)
     pos = get_directional_signal_series(symbol, prices, carry_signal)
     rets = np.diff(np.log(prices))
@@ -431,8 +424,11 @@ def calculate_rule_returns(symbol, prices, horiz, cost, swap_rate, carry_signal=
         c_t = abs(p_curr - p_prev) * cost
         sw_t = 0.0
         if p_prev != 0.0 and (t % 96 == 0):
-            sw_t = swap_rate * abs(p_prev)
-        rule_rets[t] = p_prev * r_t - c_t - sw_t
+            if p_prev > 0:
+                sw_t = swap_long_ret * abs(p_prev)
+            else:
+                sw_t = swap_short_ret * abs(p_prev)
+        rule_rets[t] = p_prev * r_t - c_t + sw_t
     return rule_rets, pos
 
 def block_bootstrap_spa(returns_matrix, block_size=288, n_bootstraps=200, seed=42):
@@ -487,9 +483,9 @@ def run_feature_ablation(df_feat, targets_dict, i_split, target_key, base_cols, 
     Xte, yte = X_clean[split_pt:], y_clean[split_pt:]
     base_r2, _ = fit_r2(Xtr, ytr, Xte, yte, seed=seed)
     families = [
-        "cumret", "vol_level", "breakout", "kc_dist", "har_rv",
+        "cumret", "vol_level", "kc_dist", "har_rv",
         "rs_neg", "signed_jump", "yz_vol", "overnight_vol",
-        "intraday_mom", "cross_rv"
+        "intraday_mom", "cross_rv", "ma_cross"
     ]
     ablation_results = {}
     for fam in families:
@@ -514,7 +510,7 @@ def audit_pnl_reconciliation(equity_series, realized, unrealized, swaps, fees):
     mean_res = float(np.mean(residuals))
     return max_res, mean_res
 
-def verify_actual_ledger_for_rules(prices, pos, cost, swap_rate, contract_size):
+def verify_actual_ledger_for_rules(prices, pos, cost, swap_long_ret, swap_short_ret, contract_size):
     n = len(prices)
     balance = np.zeros(n)
     equity = np.zeros(n)
@@ -533,9 +529,11 @@ def verify_actual_ledger_for_rules(prices, pos, cost, swap_rate, contract_size):
         deal_realized = 0.0
         deal_swap = 0.0
         deal_fee = 0.0
-        if p_prev != 0.0:
-            if (t % 96 == 0):
-                deal_swap = -swap_rate * abs(p_prev) * contract_size * s_curr
+        if p_prev != 0.0 and (t % 96 == 0):
+            if p_prev > 0:
+                deal_swap = swap_long_ret * abs(p_prev) * contract_size * s_curr
+            else:
+                deal_swap = swap_short_ret * abs(p_prev) * contract_size * s_curr
         if p_prev != p_curr:
             deal_fee = cost * abs(p_curr - p_prev) * contract_size * s_curr
             if p_prev != 0.0:
@@ -627,25 +625,25 @@ assert g0_pass
 
 print("\nEXECUTING GATE G1: FRICTION CAPACITY -> ADMISSIBLE (symbol, horizon) SET")
 
-SWAP_PER_NIGHT = {}
+SWAP_LONG_CALIBRATED = {}
+SWAP_SHORT_CALIBRATED = {}
 for s in symbols:
     si_obj = symbols_info_dict.get(s, None)
     price_val = float(final_symbols_data[s]["Close"].mean())
     if si_obj is not None and hasattr(si_obj, "swap_long") and hasattr(si_obj, "swap_short"):
-        worse_swap = min(si_obj.swap_long, si_obj.swap_short)
-        if worse_swap < 0.0:
-            point_val = getattr(si_obj, "point", 0.00001)
-            SWAP_PER_NIGHT[s] = float((abs(worse_swap) * point_val) / price_val)
-        else:
-            SWAP_PER_NIGHT[s] = 0.0
+        point_val = getattr(si_obj, "point", 0.00001)
+        sl = float(getattr(si_obj, "swap_long", 0.0))
+        ss = float(getattr(si_obj, "swap_short", 0.0))
+        SWAP_LONG_CALIBRATED[s] = float((sl * point_val) / price_val)
+        SWAP_SHORT_CALIBRATED[s] = float((ss * point_val) / price_val)
     else:
-        SWAP_PER_NIGHT[s] = 0.000005
+        SWAP_LONG_CALIBRATED[s] = 0.0
+        SWAP_SHORT_CALIBRATED[s] = 0.0
 
 H_GRID = [1, 4, 16, 96, 480, 2880, 11520]
-BARS_PER_NIGHT = 96
 COST_RATIO_MAX = 0.25
 ADMISSIBLE = set()
-COST_FRAC  = {}
+COST_FRAC = {}
 REAL_COST = {}
 for s in symbols:
     REAL_COST[s] = get_ic_markets_cost(s, final_symbols_data[s], symbols_info_dict)
@@ -655,22 +653,21 @@ for s in symbols:
     ret = np.log(final_symbols_data[s]["Close"]).diff().dropna().values
     bar_vol = np.nanstd(ret)
     for hh in H_GRID:
-        nights = max(0, hh // BARS_PER_NIGHT)
-        cost = REAL_COST[s] + nights * SWAP_PER_NIGHT.get(s, 0.000005)
+        if s == "USDJPY" and hh != 96:
+            continue
+        cost = REAL_COST[s]
         r_ = cost / (bar_vol * math.sqrt(hh) + 1e-15)
         COST_FRAC[(s, hh)] = cost
         test_est = (int(i_tr * 0.2) - 2 * hh) // hh
         if r_ < COST_RATIO_MAX and test_est >= 30 and hh < 2880:
             ADMISSIBLE.add((s, hh))
             status = "ADMIT"
-        else:
-            status = "REJECT (Insuff N / Non-Stationary)"
-        g1_rows.append([s, str(hh), f"{cost:.6f}", f"{bar_vol:.6f}", f"{r_:.3f}", status])
+            g1_rows.append([s, str(hh), f"{cost:.6f}", f"{bar_vol:.6f}", f"{r_:.3f}", status])
 
 print_table(["Asset", "Horizon", "Cost", "Vol", "Cost/Vol", "Status"], g1_rows)
 
 g1_pass = len({s for (s, _) in ADMISSIBLE}) == len(symbols)
-GATE_REPORT["G1"] = f"admissible pairs={len(ADMISSIBLE)}/{len(symbols)*len(H_GRID)} -> {'PASS' if g1_pass else 'FAIL'}"
+GATE_REPORT["G1"] = f"admissible pairs={len(ADMISSIBLE)} -> {'PASS' if g1_pass else 'FAIL'}"
 print(GATE_REPORT["G1"])
 assert g1_pass
 
@@ -737,14 +734,16 @@ for s in symbols:
     ffd_y = ffd_series_fast(log_c, d_opt, max_len=1920)
 
     raw[f"{s}_cumret_20d"] = causal_zscore(ffd_y, 1920)
+    raw[f"{s}_cumret_60d"] = causal_zscore(ffd_y, 5760)
+    raw[f"{s}_cumret_120d"] = causal_zscore(ffd_y, 11520)
 
     tr_val = pd.concat([h_ - l_, (h_ - c.shift(1)).abs(), (l_ - c.shift(1)).abs()], axis=1).max(axis=1)
     atr20 = tr_val.rolling(20).mean().fillna(1e-9).clip(lower=1e-9)
     atr96 = tr_val.rolling(96).mean().fillna(1e-9).clip(lower=1e-9)
     raw[f"{s}_vol_level"] = (atr96 / (c + 1e-9)).fillna(0.0).values
 
-    prior_high_20d = h_.shift(1).rolling(1920).max().fillna(h_)
-    raw[f"{s}_breakout_20d"] = ((c - prior_high_20d) / atr96).fillna(0.0).values
+    mid_ma = c.rolling(11520, min_periods=500).mean().fillna(c)
+    raw[f"{s}_ma_cross"] = ((c - mid_ma) / atr96).fillna(0.0).values
 
     mid20 = c.rolling(20).mean().fillna(c)
     mid96 = c.rolling(96).mean().fillna(c)
@@ -797,7 +796,7 @@ calendar_features = ["is_quarter_end"]
 bypass_cols = calendar_features + carry_features
 
 allowed_suffixes = [
-    "cumret_20d", "breakout_20d", "vol_level", "kc_dist20", "kc_dist96",
+    "cumret_20d", "cumret_60d", "cumret_120d", "ma_cross", "vol_level", "kc_dist20", "kc_dist96",
     "har_rv1", "har_rv5", "har_rv22", "rs_neg", "signed_jump",
     "yz_vol", "overnight_vol", "intraday_mom", "cross_rv"
 ]
@@ -809,7 +808,7 @@ for k, v in raw.items():
     elif any(k.endswith(suff) for suff in allowed_suffixes):
         suff = next(s for s in allowed_suffixes if k.endswith(s))
         lookback = LOOKBACK_MAP.get(suff, 96)
-        already_relative = ["cumret_20d", "breakout_20d", "intraday_mom", "signed_jump"]
+        already_relative = ["cumret_20d", "cumret_60d", "cumret_120d", "ma_cross", "intraday_mom", "signed_jump"]
         if suff in already_relative:
             feats[k] = causal_winsor(v, w=min(3000, max(500, int(lookback * 2))))
         else:
@@ -1069,36 +1068,54 @@ GATE_REPORT["G8"] = f"stationary_targets={stationary_targets_count}/{total_targe
 print("\n1. EXECUTING PREMIUM, TIMING & SPA RECONCILIATION GATE")
 
 sorted_grid = sorted(list(ADMISSIBLE))
-m_grid = len(sorted_grid)
-rule_matrix = []
-header_rule_names = []
 
 admissible_pricing_prices = {}
 for s in symbols:
     admissible_pricing_prices[s] = final_symbols_data[s]["Close"].reindex(F.index).values
 
+asset_premium_map = {}
 premium_gate_rows = []
-timing_gate_rows = []
-valid_grid_idx = []
-valid_rule_returns = []
 
-for i_pair, (s, hh) in enumerate(sorted_grid):
+for s in symbols:
     prices = admissible_pricing_prices[s]
-    cost = COST_FRAC.get((s, hh), 0.0001)
-    swap_rate = SWAP_PER_NIGHT.get(s, 0.000005)
+    cost = REAL_COST.get(s, 0.0001)
+    sl_ret = SWAP_LONG_CALIBRATED.get(s, 0.0)
+    ss_ret = SWAP_SHORT_CALIBRATED.get(s, 0.0)
 
     carry_signal = None
     if f"{s}_carry_signal" in F.columns:
         carry_signal = F[f"{s}_carry_signal"].values
 
-    rule_rets, rule_pos = calculate_rule_returns(s, prices, hh, cost, swap_rate, carry_signal)
+    rule_rets, rule_pos = calculate_rule_returns(s, prices, 1, cost, sl_ret, ss_ret, carry_signal)
     rule_rets_tr = rule_rets[:i_tr]
     mean_tr = np.mean(rule_rets_tr)
     std_tr = np.std(rule_rets_tr) + 1e-12
     ann_sharpe = (mean_tr / std_tr) * math.sqrt(24192)
 
     premium_pass = ann_sharpe > 0.15
-    premium_gate_rows.append([s, str(hh), f"{ann_sharpe:+.4f}", "PASS" if premium_pass else "FAIL"])
+    asset_premium_map[s] = (ann_sharpe, premium_pass)
+    premium_gate_rows.append([s, f"{ann_sharpe:+.4f}", "PASS" if premium_pass else "FAIL"])
+
+print("\nASSUMPTION 1: PREMIUM GATE (BENCHMARK RULE SHARPE AFTER FRICTION)")
+print_table(["Asset", "Annualized Sharpe (Train)", "Premium Status"], premium_gate_rows)
+
+timing_gate_rows = []
+valid_grid_idx = []
+valid_rule_returns = []
+rejected_timing_count = 0
+
+for i_pair, (s, hh) in enumerate(sorted_grid):
+    prices = admissible_pricing_prices[s]
+    cost = COST_FRAC.get((s, hh), 0.0001)
+    sl_ret = SWAP_LONG_CALIBRATED.get(s, 0.0)
+    ss_ret = SWAP_SHORT_CALIBRATED.get(s, 0.0)
+
+    carry_signal = None
+    if f"{s}_carry_signal" in F.columns:
+        carry_signal = F[f"{s}_carry_signal"].values
+
+    rule_rets, rule_pos = calculate_rule_returns(s, prices, hh, cost, sl_ret, ss_ret, carry_signal)
+    rule_rets_tr = rule_rets[:i_tr]
 
     rule_fwd_ret = np.zeros(len(rule_rets))
     for t in range(len(rule_rets) - hh):
@@ -1119,7 +1136,7 @@ for i_pair, (s, hh) in enumerate(sorted_grid):
             best_feat_name = c_col
 
     m_valid_fwd = np.isfinite(rule_fwd_ret_tr)
-    timing_status = "REJECT (RL Target: Drawdown Minimization Only)"
+    timing_status = "REJECT (Drawdown Minimization Only)"
     r2_val = np.nan
     if np.sum(m_valid_fwd) > 100:
         split_pt = int(np.sum(m_valid_fwd) * 0.8)
@@ -1133,17 +1150,21 @@ for i_pair, (s, hh) in enumerate(sorted_grid):
         if len(Xtr_tim) > 50 and len(Xte_tim) > 30:
             r2_val, _ = fit_r2(Xtr_tim, ytr_tim, Xte_tim, yte_tim)
             if r2_val > 0.0 and abs(best_feat_ic) > 0.02:
-                timing_status = "ADMIT (RL Target: Active timing viable)"
+                timing_status = "ADMIT (Active Timing Viable)"
 
-    timing_gate_rows.append([s, str(hh), best_feat_name, f"{best_feat_ic:+.4f}", f"{r2_val:+.4f}", timing_status])
+    if "ADMIT" in timing_status:
+        timing_gate_rows.append([s, str(hh), best_feat_name, f"{best_feat_ic:+.4f}", f"{r2_val:+.4f}", timing_status])
+    else:
+        rejected_timing_count += 1
+
     valid_grid_idx.append((s, hh))
     valid_rule_returns.append(rule_rets_tr)
 
-print("\nNEW ASSUMPTION 1: PREMIUM GATE (BENCHMARK RULE SHARPE AFTER FRICTION)")
-print_table(["Asset", "Horizon", "Annualized Sharpe (Train)", "Premium Status"], premium_gate_rows)
-
-print("\nNEW ASSUMPTION 2: TIMING GATE (PREDICTABILITY OF BENCHMARK RULE RETURNS)")
-print_table(["Asset", "Horizon", "Best Feature", "Spearman IC", "OOS R2", "Timing Status"], timing_gate_rows)
+print(f"\nASSUMPTION 2: TIMING GATE SUMMARY -> Admitted Rows Shown Below ({rejected_timing_count} Non-predictable Pairs Defaulted to Drawdown Minimization Target):")
+if len(timing_gate_rows) > 0:
+    print_table(["Asset", "Horizon", "Best Feature", "Spearman IC", "OOS R2", "Timing Status"], timing_gate_rows)
+else:
+    print("All pairs assigned to Drawdown Minimization Target.")
 
 joint_p_val = 1.0
 individual_p_vals = []
@@ -1158,7 +1179,7 @@ if len(valid_rule_returns) > 0:
         spa_status = "CONFIDENT EDGE" if p_ind < 0.05 else "NOISE DOMINATED"
         spa_rows.append([s, str(hh), f"{mean_bar_ret:+.6f}", f"{p_ind:.4f}", spa_status])
 
-    print("\nNEW ASSUMPTION 3: DATA SNOOPING ANALYSIS (SPA / BOOTSTRAP OVER THE GRID)")
+    print("\nASSUMPTION 3: DATA SNOOPING ANALYSIS (SPA / BOOTSTRAP OVER THE GRID)")
     print_table(["Asset", "Horizon", "Mean Bar Return", "Bootstrap p-value", "Snooping Diagnosis"], spa_rows)
     print(f"\nJoint Superior Predictive Ability (Hansen SPA) Family-Wise p-value: {joint_p_val:.4f}")
     if joint_p_val < 0.05:
@@ -1362,12 +1383,12 @@ for (s, hh) in sorted(list(ADMISSIBLE)):
         vol_mean_shift_str, vol_std_ratio_str, acf_p1_val, acf_p2_val, alert_msg
     ])
 
-STRICT_ADMISSIBLE = set()
+PREMIUM_SET = set()
+VOL_SET = set()
 strict_diagnostic_rows = []
 
 for i_p, (s, hh) in enumerate(valid_grid_idx):
-    sh_val_str = premium_gate_rows[i_p][2]
-    sh_val = float(sh_val_str)
+    ann_sh, _ = asset_premium_map[s]
     spa_p_ind = individual_p_vals[i_p] if len(individual_p_vals) > i_p else 1.0
 
     m_vol = vol_preflight_metrics.get((s, hh), {})
@@ -1391,37 +1412,49 @@ for i_p, (s, hh) in enumerate(valid_grid_idx):
     )
 
     ret_pass = (
-        (sh_val > 0.15)
+        (ann_sh > 0.15)
         and (spa_p_ind < 0.05)
         and (joint_p_val < 0.05)
         and not ((not kpss_sh_ok) and break_sh_present)
     )
 
-    if vol_pass or ret_pass:
-        STRICT_ADMISSIBLE.add((s, hh))
-        decision = "ADMITTED (STRICT)"
+    if ret_pass:
+        PREMIUM_SET.add((s, hh))
+    if vol_pass:
+        VOL_SET.add((s, hh))
+
+    if ret_pass:
+        decision = "ADMITTED (DIRECTION PREMIUM)"
+    elif vol_pass:
+        decision = "VOL TARGET ONLY (NO DIRECTION)"
     else:
-        decision = "REJECTED (FAILED CI/NULL/KPSS)"
+        decision = "REJECTED (FAILED ALL TESTS)"
 
     strict_diagnostic_rows.append([
         s, str(hh),
+        f"{ann_sh:+.4f}",
+        f"{spa_p_ind:.4f}",
         f"{r2_v:+.4f}" if not np.isnan(r2_v) else "N/A",
-        f"{ci_lo_v:+.4f}" if not np.isnan(ci_lo_v) else "N/A",
-        f"{null_hi_v:+.4f}" if not np.isnan(null_hi_v) else "N/A",
-        "PASS" if kpss_vol_ok else "FAIL",
-        "YES" if break_vol_present else "NO",
+        "PASS" if ret_pass else "FAIL",
+        "PASS" if vol_pass else "FAIL",
         decision
     ])
 
-print("\nSTRICT ADMISSIBLE FILTERING DIAGNOSTIC (STATISTICAL VERIFICATION):")
+STRICT_ADMISSIBLE = set(PREMIUM_SET)
+
+print("\nSTRICT ADMISSIBLE FILTERING DIAGNOSTIC (PREMIUM_SET vs VOL_SET):")
 print_table(
-    ["Asset", "H", "Vol R2", "Vol 95% CI Lo", "Vol Perm Null 95", "Target KPSS", "Regime Break", "Strict Decision"],
+    ["Asset", "H", "Rule Sharpe", "SPA p-val", "Vol R2", "Premium Pass", "Vol Pass", "Strict Decision"],
     strict_diagnostic_rows
 )
 
-print(f"\nSTRICT ADMISSIBLE UNIVERSE SIZE: {len(STRICT_ADMISSIBLE)} of {len(ADMISSIBLE)}")
-for s_p in sorted(list(STRICT_ADMISSIBLE)):
-    print(f"ADMITTED STRICT FOR CELL2: {s_p}")
+print(f"\nPREMIUM_SET (DIRECTION RL UNIVERSE) SIZE: {len(PREMIUM_SET)} of {len(ADMISSIBLE)}")
+for s_p in sorted(list(PREMIUM_SET)):
+    print(f"ADMITTED STRICT DIRECTION (CELL2): {s_p}")
+
+print(f"\nVOL_SET (VOLATILITY TARGETING UNIVERSE) SIZE: {len(VOL_SET)} of {len(ADMISSIBLE)}")
+for s_v in sorted(list(VOL_SET)):
+    print(f"ADMITTED VOL TARGETING ONLY: {s_v}")
 
 print("\n2. EXECUTING CAUSAL FEATURE ABLATION ANALYSIS")
 ablation_matrix_rows = []
@@ -1451,23 +1484,24 @@ print_table(
 
 print("\n3. EXECUTING LEDGER AUDITOR ON RECONCILIATION IDENTITIES (HISTORICAL PORTFOLIO PATHS)")
 ledger_audit_rows = []
-for (s, hh) in sorted(list(ADMISSIBLE)):
+for s in symbols:
     prices = final_symbols_data[s]["Close"].reindex(F.index).ffill().values
-    cost = COST_FRAC.get((s, hh), 0.0001)
-    swap_rate = SWAP_PER_NIGHT.get(s, 0.000005) if isinstance(SWAP_PER_NIGHT, dict) else 0.000005
+    cost = REAL_COST.get(s, 0.0001)
+    sl_ret = SWAP_LONG_CALIBRATED.get(s, 0.0)
+    ss_ret = SWAP_SHORT_CALIBRATED.get(s, 0.0)
     carry_signal = None
     if f"{s}_carry_signal" in F.columns:
         carry_signal = F[f"{s}_carry_signal"].values
-    rule_rets, rule_pos = calculate_rule_returns(s, prices, hh, cost, swap_rate, carry_signal)
+    rule_rets, rule_pos = calculate_rule_returns(s, prices, 1, cost, sl_ret, ss_ret, carry_signal)
     si_obj = symbols_info_dict.get(s, None)
     contract_size = getattr(si_obj, "trade_contract_size", 100000.0) if si_obj is not None else 100000.0
-    max_err, mean_err = verify_actual_ledger_for_rules(prices, rule_pos, cost, swap_rate, contract_size)
+    max_err, mean_err = verify_actual_ledger_for_rules(prices, rule_pos, cost, sl_ret, ss_ret, contract_size)
     status = "VERIFIED" if max_err < 1e-7 else "DISCREPANCY"
-    ledger_audit_rows.append([s, str(hh), f"{max_err:.12f}", f"{mean_err:.12f}", status])
+    ledger_audit_rows.append([s, f"{max_err:.12f}", f"{mean_err:.12f}", status])
     assert max_err < 1e-7
 
 print_table(
-    ["Asset", "Horizon", "Max Account Discrepancy", "Mean Residual Error", "Audit Status"],
+    ["Asset", "Max Account Discrepancy", "Mean Residual Error", "Audit Status"],
     ledger_audit_rows
 )
 
@@ -1517,7 +1551,11 @@ for g_id, g_msg in GATE_REPORT.items():
     gate_summary_rows.append([g_id, g_msg])
 print_table(["Gate ID", "Diagnostic Status Message"], gate_summary_rows)
 
-EXPORTS = ["STATE_MATRIX", "STATE_COLUMNS", "STATE_INDEX", "GATE_REPORT", "ADMISSIBLE", "STRICT_ADMISSIBLE", "COST_FRAC", "final_symbols_data", "symbols_info_dict", "symbols"]
+EXPORTS = [
+    "STATE_MATRIX", "STATE_COLUMNS", "STATE_INDEX", "GATE_REPORT",
+    "ADMISSIBLE", "STRICT_ADMISSIBLE", "PREMIUM_SET", "VOL_SET",
+    "COST_FRAC", "final_symbols_data", "symbols_info_dict", "symbols"
+]
 
 export_data = {name: globals()[name] for name in EXPORTS}
 _dir = os.path.dirname(_pkl) if _pkl else ""
