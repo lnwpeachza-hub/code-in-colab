@@ -62,13 +62,18 @@ final_symbols_data = globals()["final_symbols_data"]
 symbols_info_dict = globals()["symbols_info_dict"]
 symbols = globals()["symbols"]
 
-if "STRICT_ADMISSIBLE" in globals():
+if "PREMIUM_SET" in globals():
+    pset = globals()["PREMIUM_SET"]
+    if isinstance(pset, (list, set, tuple, dict)):
+        pset_symbols = sorted(list({p[0] if isinstance(p, tuple) else p for p in pset}))
+        if len(pset_symbols) > 0:
+            symbols = pset_symbols
+elif "STRICT_ADMISSIBLE" in globals():
     sadm = globals()["STRICT_ADMISSIBLE"]
     if isinstance(sadm, (list, set, tuple, dict)):
-        sadm_symbols = {p[0] if isinstance(p, tuple) else p for p in sadm}
-        filtered = [s for s in symbols if s in sadm_symbols]
-        if len(filtered) > 0:
-            symbols = filtered
+        sadm_symbols = sorted(list({p[0] if isinstance(p, tuple) else p for p in sadm}))
+        if len(sadm_symbols) > 0:
+            symbols = sadm_symbols
 
 def print_table(headers, rows):
     widths = [len(h) for h in headers]
@@ -88,15 +93,15 @@ def print_table(headers, rows):
 def get_ic_markets_cost(symbol, df, info_dict):
     price = float(df["Close"].mean())
     si = info_dict.get(symbol)
-    point_val = getattr(si, "point", 0.00001)
-    contract_size = getattr(si, "trade_contract_size", 100000.0)
+    point_val = getattr(si, "point", 0.00001) if si is not None else 0.00001
+    contract_size = getattr(si, "trade_contract_size", 100000.0) if si is not None else 100000.0
     spread_cols = [c for c in df.columns if c.lower() == "spread"]
     if len(spread_cols) > 0:
         spread_pts = float(df[spread_cols[0]].median())
         if spread_pts <= 0.0 or np.isnan(spread_pts):
-            spread_pts = getattr(si, "spread", 2.0)
+            spread_pts = getattr(si, "spread", 2.0) if si is not None else 2.0
     else:
-        spread_pts = getattr(si, "spread", 2.0)
+        spread_pts = getattr(si, "spread", 2.0) if si is not None else 2.0
     spread_cost = (spread_pts * point_val) / price
     comm_cost = 7.0 / (contract_size * price) if contract_size > 0 else 0.0
     return float(spread_cost + comm_cost)
@@ -114,7 +119,7 @@ if "SWAP_PER_NIGHT" not in globals():
     for s in symbols:
         si_obj = symbols_info_dict.get(s, None)
         price_val = float(final_symbols_data[s]["Close"].mean())
-        point_val = getattr(si_obj, "point", 0.00001)
+        point_val = getattr(si_obj, "point", 0.00001) if si_obj is not None else 0.00001
         if si_obj is not None and hasattr(si_obj, "swap_long") and hasattr(si_obj, "swap_short"):
             worse_swap = min(si_obj.swap_long, si_obj.swap_short)
             if worse_swap < 0.0:
@@ -307,13 +312,18 @@ final_symbols_data = globals()["final_symbols_data"]
 symbols_info_dict = globals()["symbols_info_dict"]
 symbols = globals()["symbols"]
 
-if "STRICT_ADMISSIBLE" in globals():
+if "PREMIUM_SET" in globals():
+    pset = globals()["PREMIUM_SET"]
+    if isinstance(pset, (list, set, tuple, dict)):
+        pset_symbols = sorted(list({p[0] if isinstance(p, tuple) else p for p in pset}))
+        if len(pset_symbols) > 0:
+            symbols = pset_symbols
+elif "STRICT_ADMISSIBLE" in globals():
     sadm = globals()["STRICT_ADMISSIBLE"]
     if isinstance(sadm, (list, set, tuple, dict)):
-        sadm_symbols = {p[0] if isinstance(p, tuple) else p for p in sadm}
-        filtered = [s for s in symbols if s in sadm_symbols]
-        if len(filtered) > 0:
-            symbols = filtered
+        sadm_symbols = sorted(list({p[0] if isinstance(p, tuple) else p for p in sadm}))
+        if len(sadm_symbols) > 0:
+            symbols = sadm_symbols
 
 WINDOW = 4
 EMBARGO = 2880
@@ -357,15 +367,15 @@ class EmaVarianceTracker:
 def get_ic_markets_cost(symbol, df, info_dict):
     price = float(df["Close"].mean())
     si = info_dict.get(symbol)
-    point_val = getattr(si, "point", 0.00001)
-    contract_size = getattr(si, "trade_contract_size", 100000.0)
+    point_val = getattr(si, "point", 0.00001) if si is not None else 0.00001
+    contract_size = getattr(si, "trade_contract_size", 100000.0) if si is not None else 100000.0
     spread_cols = [c for c in df.columns if c.lower() == "spread"]
     if len(spread_cols) > 0:
         spread_pts = float(df[spread_cols[0]].median())
         if spread_pts <= 0.0 or np.isnan(spread_pts):
-            spread_pts = getattr(si, "spread", 2.0)
+            spread_pts = getattr(si, "spread", 2.0) if si is not None else 2.0
     else:
-        spread_pts = getattr(si, "spread", 2.0)
+        spread_pts = getattr(si, "spread", 2.0) if si is not None else 2.0
     spread_cost = (spread_pts * point_val) / price
     comm_cost = 7.0 / (contract_size * price) if contract_size > 0 else 0.0
     return float(spread_cost + comm_cost)
@@ -383,7 +393,7 @@ if "SWAP_PER_NIGHT" not in globals():
     for s in symbols:
         si_obj = symbols_info_dict.get(s, None)
         price_val = float(final_symbols_data[s]["Close"].mean())
-        point_val = getattr(si_obj, "point", 0.00001)
+        point_val = getattr(si_obj, "point", 0.00001) if si_obj is not None else 0.00001
         if si_obj is not None and hasattr(si_obj, "swap_long") and hasattr(si_obj, "swap_short"):
             worse_swap = min(si_obj.swap_long, si_obj.swap_short)
             if worse_swap < 0.0:
@@ -802,7 +812,7 @@ class ICEnv(MtEnv):
             price_past = float(df.iloc[nearest_idx - lookback]["Close"])
             trend_sign = 1.0 if price_now >= price_past else -1.0
         else:
-            return 0.0
+            trend_sign = 1.0
 
         if symbol == "USDJPY":
             carry_sign = 1.0
@@ -1088,7 +1098,6 @@ class HarnessASanityWrapper(gym.Wrapper):
         super().__init__(env)
         self.W, self.D = self.unwrapped.observation_space["features"].shape
         self.num_symbols = len(self.unwrapped.trading_symbols)
-        self.unwrapped.get_directional_signal = lambda s: 1.0
 
     def _make_synthetic_obs(self, obs, tick):
         features = np.zeros((self.W, self.D), dtype=np.float32)
@@ -1101,7 +1110,6 @@ class HarnessASanityWrapper(gym.Wrapper):
         return obs
 
     def reset(self, seed=None, options=None):
-        self.unwrapped.get_directional_signal = lambda s: 1.0
         obs, info = self.env.reset(seed=seed, options=options)
         obs = self._make_synthetic_obs(obs, self.unwrapped._current_tick)
         return obs, info
@@ -1111,18 +1119,36 @@ class HarnessASanityWrapper(gym.Wrapper):
         obs = self._make_synthetic_obs(obs, self.unwrapped._current_tick)
         return obs, r, term, trunc, info
 
+class ResBlock(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.ln = nn.LayerNorm(dim)
+        self.fc1 = nn.Linear(dim, dim)
+        self.act = nn.GELU()
+        self.fc2 = nn.Linear(dim, dim)
+
+    def forward(self, x):
+        res = x
+        x = self.ln(x)
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.fc2(x)
+        return res + x
+
 class MLPExtractorDSR(BaseFeaturesExtractor):
     def __init__(self, observation_space, d_model=64):
         W, D = observation_space["features"].shape
         flat_dim = W * D
         super().__init__(observation_space, features_dim=d_model + 8)
         self.features_flat_dim = flat_dim
+        self.input_ln = nn.LayerNorm(flat_dim)
         self.feature_mlp = nn.Sequential(
             nn.Linear(flat_dim, d_model),
+            ResBlock(d_model),
             nn.LayerNorm(d_model),
-            nn.Tanh(),
+            nn.GELU(),
             nn.Linear(d_model, d_model),
-            nn.Tanh()
+            nn.LayerNorm(d_model)
         )
         n_ord = int(np.prod(observation_space["orders"].shape))
         n_extra = 0
@@ -1134,11 +1160,13 @@ class MLPExtractorDSR(BaseFeaturesExtractor):
             n_extra += int(np.prod(observation_space["pos_state"].shape))
         self.acct = nn.Sequential(
             nn.Linear(3 + n_ord + n_extra, 8),
-            nn.Tanh()
+            nn.LayerNorm(8),
+            nn.GELU()
         )
 
     def forward(self, obs):
         x = obs["features"].flatten(1)
+        x = self.input_ln(x)
         z = self.feature_mlp(x)
         scale = obs["equity"].abs() + 1e-6
         parts = [
@@ -1410,9 +1438,14 @@ class BehaviorCallback(BaseCallback):
 
 def run_bc_oracle_probe(env_train, oracle_policy_fn, seed=42, num_samples=2000, epochs=20):
     policy = PPO("MultiInputPolicy", env_train, seed=seed, verbose=0,
-                 policy_kwargs=dict(features_extractor_class=MLPExtractorDSR, net_arch=[64]),
+                 policy_kwargs=dict(
+                     features_extractor_class=MLPExtractorDSR,
+                     net_arch=[64],
+                     optimizer_class=torch.optim.AdamW,
+                     optimizer_kwargs=dict(weight_decay=1e-4)
+                 ),
                  learning_rate=1e-3, device="cuda" if torch.cuda.is_available() else "cpu").policy
-    optimizer = torch.optim.Adam(policy.parameters(), lr=1e-3)
+    optimizer = torch.optim.AdamW(policy.parameters(), lr=1e-3, weight_decay=1e-4)
     obs_list = []
     act_list = []
     obs, _ = env_train.reset(seed=seed)
@@ -1592,14 +1625,24 @@ def print_behavior_table(rows):
 def make_agent(env, seed, n_steps=1024, batch_size=128):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     return PPO("MultiInputPolicy", env, seed=seed, verbose=0,
-               policy_kwargs=dict(features_extractor_class=MLPExtractorDSR, net_arch=[64]),
+               policy_kwargs=dict(
+                   features_extractor_class=MLPExtractorDSR,
+                   net_arch=[64],
+                   optimizer_class=torch.optim.AdamW,
+                   optimizer_kwargs=dict(weight_decay=1e-4)
+               ),
                n_steps=n_steps, batch_size=batch_size, learning_rate=3e-4, ent_coef=0.005,
                gamma=0.99, gae_lambda=0.95, clip_range=0.2, vf_coef=0.5, device=device, n_epochs=4)
 
 def make_sanity_agent(env, seed):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     return PPO("MultiInputPolicy", env, seed=seed, verbose=0,
-               policy_kwargs=dict(features_extractor_class=MLPExtractorDSR, net_arch=[64]),
+               policy_kwargs=dict(
+                   features_extractor_class=MLPExtractorDSR,
+                   net_arch=[64],
+                   optimizer_class=torch.optim.AdamW,
+                   optimizer_kwargs=dict(weight_decay=1e-4)
+               ),
                n_steps=512, batch_size=128, learning_rate=1e-3, ent_coef=0.0,
                gamma=0.9, gae_lambda=0.95, clip_range=0.2, vf_coef=0.5, device=device)
 
@@ -1934,7 +1977,8 @@ def make_synthetic_symbols_data(symbols, time_points):
     t_arr = np.arange(len(time_points), dtype=np.float64)
     for i, s in enumerate(symbols):
         phase = i * np.pi / 3.0
-        close_arr = 1.0 + 0.05 * np.sin(t_arr / 5.0 + phase)
+        drift = (1.0005) ** t_arr
+        close_arr = drift * (1.0 + 0.05 * np.sin(t_arr / 5.0 + phase))
         df = pd.DataFrame(index=time_points)
         df["Close"] = close_arr
         df["Open"] = close_arr
@@ -2133,14 +2177,14 @@ if __name__ == '__main__':
         pt_val = getattr(si, "point", "N/A")
         spr_val = getattr(si, "spread", "N/A")
         df_sym = final_symbols_data[s]
-        point_val = getattr(si, "point", 0.00001)
+        point_val = getattr(si, "point", 0.00001) if si is not None else 0.00001
         spread_cols = [c for c in df_sym.columns if c.lower() == "spread"]
         if len(spread_cols) > 0:
             spread_pts = float(df_sym[spread_cols[0]].median())
             if spread_pts <= 0.0 or np.isnan(spread_pts):
-                spread_pts = getattr(si, "spread", 2.0)
+                spread_pts = getattr(si, "spread", 2.0) if si is not None else 2.0
         else:
-            spread_pts = getattr(si, "spread", 2.0)
+            spread_pts = getattr(si, "spread", 2.0) if si is not None else 2.0
         sym_rows.append([s, str(has_pt), str(pt_val), str(point_val), str(has_spr), str(spr_val), str(spread_pts)])
 
     print("\nSYMBOL PROPERTIES INTEGRITY DIAGNOSTIC:")
@@ -2185,6 +2229,11 @@ if __name__ == '__main__':
     sanity_base = TargetWeightEnv(sanity_sim, symbols, WINDOW, tp_train, decision_interval=16)
     sanity_sub = SubEpisodeEnv(sanity_base, ep_len=2000)
     sanity_wrapped = HarnessASanityWrapper(BootstrapFix(sanity_sub))
+    sanity_wrapped.reset(seed=42)
+
+    for s_check in symbols:
+        dir_chk = sanity_wrapped.unwrapped.get_directional_signal(s_check)
+        assert dir_chk > 0.0
 
     verify_no_lookahead_passed = True
     try:
@@ -2213,7 +2262,7 @@ if __name__ == '__main__':
         for i, s in enumerate(env.unwrapped.trading_symbols):
             phase = i * np.pi / 3.0
             val = np.cos(tick / 5.0 + phase)
-            a_vals.append(1.0 if val >= 0.0 else 0.0)
+            a_vals.append(max(0.0, float(val)))
         return np.array(a_vals, dtype=np.float64)
 
     oracle_res = rollout(sanity_wrapped, lambda o, e: oracle_policy(e), seed=42)
